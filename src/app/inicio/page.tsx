@@ -1,0 +1,203 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { CheckCircle2, Circle, WalletCards } from "lucide-react";
+import { AppShell } from "@/components/layout/AppShell";
+import { AuthGuard } from "@/components/layout/AuthGuard";
+import { ConfigNotice } from "@/components/layout/ConfigNotice";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { StatusBadge } from "@/components/ui/StatusBadge";
+import { currentMonthValue, formatDateBr, monthLabel } from "@/lib/dates/format";
+import { formatCurrency } from "@/lib/money/format";
+import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
+import { fetchMonthData, updateStatus, type MonthData } from "@/features/finance/api";
+import type { Expense, PaymentStatus } from "@/types/finance";
+
+export default function InicioPage() {
+  const [month, setMonth] = useState(currentMonthValue());
+  const [data, setData] = useState<MonthData | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!hasSupabaseConfig()) return;
+    setLoading(true);
+    setError("");
+    try {
+      setData(await fetchMonthData(createClient(), month));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao carregar dados.");
+    } finally {
+      setLoading(false);
+    }
+  }, [month]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const summary = useMemo(() => {
+    const entries = data?.entries.reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+    const expensePaid = data?.expenses.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+    const expensePending = data?.expenses.filter((item) => item.status === "pending").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+    const cardPaid = data?.installments.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+    const cardPending = data?.installments.filter((item) => item.status === "pending").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+    const paid = expensePaid + cardPaid;
+    const pending = expensePending + cardPending;
+    return { entries, paid, pending, spent: paid + pending, balance: entries - paid - pending };
+  }, [data]);
+
+  const installmentsByCard = useMemo(() => {
+    const groups = new Map<string, NonNullable<MonthData["installments"]>>();
+    for (const item of data?.installments ?? []) {
+      const key = item.card_id;
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    return Array.from(groups.entries()).map(([cardId, items]) => ({
+      card: items[0]?.cards ?? data?.cards.find((card) => card.id === cardId) ?? null,
+      items,
+    }));
+  }, [data]);
+
+  async function toggle(table: "expenses" | "card_installments", id: string, status: PaymentStatus) {
+    await updateStatus(createClient(), table, id, status === "paid" ? "pending" : "paid");
+    await load();
+  }
+
+  return (
+    <AuthGuard>
+      <AppShell title="Inicio" subtitle={monthLabel(month)}>
+        {!hasSupabaseConfig() ? <ConfigNotice /> : null}
+        <div className="mb-5 flex items-center gap-3">
+          <input
+            type="month"
+            value={month}
+            onChange={(event) => setMonth(event.target.value)}
+            className="h-12 rounded-lg border border-gray-300 bg-white px-3 text-sm font-semibold outline-none focus:border-gray-900"
+          />
+          {loading ? <span className="text-sm text-gray-500">Atualizando...</span> : null}
+        </div>
+        {error ? <p className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
+
+        <section className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-5">
+          <SummaryCard label="Entradas" value={summary.entries} tone="green" />
+          <SummaryCard label="Gastos" value={summary.spent} tone="red" />
+          <SummaryCard label="Ja pago" value={summary.paid} tone="green" />
+          <SummaryCard label="Falta pagar" value={summary.pending} tone="amber" />
+          <SummaryCard label="Saldo previsto" value={summary.balance} tone={summary.balance >= 0 ? "green" : "red"} wide />
+        </section>
+
+        <section className="space-y-5">
+          <div className="flex items-center gap-2">
+            <WalletCards size={20} />
+            <h2 className="text-lg font-bold">A pagar em {monthLabel(month)}</h2>
+          </div>
+
+          {installmentsByCard.length === 0 && (data?.expenses.length ?? 0) === 0 && (data?.entries.length ?? 0) === 0 ? (
+            <EmptyState title="Nenhum registro neste mes." actionLabel="Registrar agora" href="/registrar" />
+          ) : null}
+
+          {installmentsByCard.map((group) => (
+            <div key={group.card?.id ?? "card"} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+              <div className="flex items-center gap-2 border-b border-gray-100 p-4">
+                <span className="size-3 rounded-full" style={{ background: group.card?.color ?? "#111827" }} />
+                <h3 className="font-bold">{group.card?.name ?? "Cartao"}</h3>
+              </div>
+              <div className="divide-y divide-gray-100">
+                {group.items.map((item) => (
+                  <PaymentRow
+                    key={item.id}
+                    title={`${item.description} ${item.installment_number}/${item.installments_count}`}
+                    amount={Number(item.amount)}
+                    date={item.due_date}
+                    status={item.status}
+                    onToggle={() => toggle("card_installments", item.id, item.status)}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+
+          <GroupedExpenses expenses={data?.expenses ?? []} onToggle={(item) => toggle("expenses", item.id, item.status)} />
+
+          <div className="rounded-lg border border-gray-200 bg-white">
+            <div className="border-b border-gray-100 p-4">
+              <h3 className="font-bold">Entradas</h3>
+            </div>
+            {(data?.entries.length ?? 0) === 0 ? (
+              <div className="p-4 text-sm text-gray-500">Nenhuma entrada registrada neste mes.</div>
+            ) : (
+              <div className="divide-y divide-gray-100">
+                {data?.entries.map((entry) => (
+                  <div key={entry.id} className="flex items-center justify-between gap-3 p-4">
+                    <div>
+                      <p className="font-semibold">{entry.description}</p>
+                      <p className="text-sm text-gray-500">{formatDateBr(entry.date)}</p>
+                    </div>
+                    <p className="font-bold text-emerald-600">{formatCurrency(entry.amount)}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      </AppShell>
+    </AuthGuard>
+  );
+}
+
+function SummaryCard({ label, value, tone, wide }: { label: string; value: number; tone: "green" | "red" | "amber"; wide?: boolean }) {
+  const toneClass = tone === "green" ? "text-emerald-600" : tone === "red" ? "text-red-600" : "text-amber-600";
+  return (
+    <div className={`rounded-lg border border-gray-200 bg-white p-4 shadow-sm ${wide ? "col-span-2 md:col-span-1" : ""}`}>
+      <p className="text-xs font-semibold uppercase text-gray-500">{label}</p>
+      <p className={`mt-1 text-xl font-bold ${toneClass}`}>{formatCurrency(value)}</p>
+    </div>
+  );
+}
+
+function PaymentRow({ title, amount, date, status, onToggle }: { title: string; amount: number; date: string; status: PaymentStatus; onToggle: () => void }) {
+  const Icon = status === "paid" ? CheckCircle2 : Circle;
+  return (
+    <div className="flex items-center gap-3 p-4">
+      <button type="button" onClick={onToggle} aria-label="Alternar status" title="Alternar status" className="text-gray-800">
+        <Icon size={24} />
+      </button>
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-semibold">{title}</p>
+        <p className="text-sm text-gray-500">{formatDateBr(date)}</p>
+      </div>
+      <div className="text-right">
+        <p className="font-bold">{formatCurrency(amount)}</p>
+        <StatusBadge status={status} />
+      </div>
+    </div>
+  );
+}
+
+function GroupedExpenses({ expenses, onToggle }: { expenses: Expense[]; onToggle: (expense: Expense) => void }) {
+  const labels: Record<string, string> = { pix: "Pix", cash: "Dinheiro", debit: "Debito", boleto: "Boleto", other: "Outro" };
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 p-4">
+        <h3 className="font-bold">Pix / Dinheiro / Debito / Boleto / Outro</h3>
+      </div>
+      {expenses.length === 0 ? (
+        <div className="p-4 text-sm text-gray-500">Nenhum gasto registrado neste mes.</div>
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {expenses.map((expense) => (
+            <PaymentRow
+              key={expense.id}
+              title={`${expense.description} - ${labels[expense.payment_method]}`}
+              amount={Number(expense.amount)}
+              date={expense.due_date}
+              status={expense.status}
+              onToggle={() => onToggle(expense)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
