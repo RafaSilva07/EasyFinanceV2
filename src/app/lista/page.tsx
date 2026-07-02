@@ -9,9 +9,10 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { fetchListData, updateStatus } from "@/features/finance/api";
 import { currentMonthValue, formatDateBr } from "@/lib/dates/format";
+import { expenseCategories, getCategoryLabel } from "@/lib/finance/categories";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import type { Card, PaymentStatus } from "@/types/finance";
+import type { Card, ExpenseCategory, PaymentStatus } from "@/types/finance";
 
 type ListItem = {
   id: string;
@@ -20,6 +21,7 @@ type ListItem = {
   amount: number;
   date: string;
   status?: PaymentStatus;
+  category?: ExpenseCategory;
   cardId?: string;
   card?: Card | null;
 };
@@ -29,6 +31,7 @@ export default function ListaPage() {
   const [type, setType] = useState("all");
   const [status, setStatus] = useState("all");
   const [card, setCard] = useState("all");
+  const [category, setCategory] = useState("all");
   const [items, setItems] = useState<ListItem[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
   const [error, setError] = useState("");
@@ -54,6 +57,7 @@ export default function ListaPage() {
           amount: Number(item.amount),
           date: item.due_date,
           status: item.status,
+          category: item.category,
         })),
         ...data.installments.map((item) => ({
           id: item.id,
@@ -62,6 +66,7 @@ export default function ListaPage() {
           amount: Number(item.amount),
           date: item.due_date,
           status: item.status,
+          category: item.category,
           cardId: item.card_id,
           card: item.cards,
         })),
@@ -80,9 +85,10 @@ export default function ListaPage() {
       if (type !== "all" && item.type !== type) return false;
       if (status !== "all" && item.status !== status) return false;
       if (card !== "all" && item.cardId !== card) return false;
+      if (category !== "all" && item.category !== category) return false;
       return true;
     });
-  }, [items, type, status, card]);
+  }, [items, type, status, card, category]);
 
   async function toggle(item: ListItem) {
     if (!item.status || item.type === "entry") return;
@@ -95,7 +101,7 @@ export default function ListaPage() {
       <AppShell title="Lista" subtitle="Registros do mes">
         {!hasSupabaseConfig() ? <ConfigNotice /> : null}
         {error ? <p className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
-        <div className="mb-5 grid gap-2 rounded-lg border border-gray-200 bg-white p-3 md:grid-cols-4">
+        <div className="mb-5 grid gap-2 rounded-lg border border-gray-200 bg-white p-3 md:grid-cols-5">
           <input type="month" value={month} onChange={(event) => setMonth(event.target.value)} className="h-11 rounded-lg border border-gray-300 px-3 text-sm font-semibold" />
           <select value={type} onChange={(event) => setType(event.target.value)} className="h-11 rounded-lg border border-gray-300 bg-white px-3 text-sm">
             <option value="all">Todos os tipos</option>
@@ -111,6 +117,10 @@ export default function ListaPage() {
           <select value={card} onChange={(event) => setCard(event.target.value)} className="h-11 rounded-lg border border-gray-300 bg-white px-3 text-sm">
             <option value="all">Todos os cartoes</option>
             {cards.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <select value={category} onChange={(event) => setCategory(event.target.value)} className="h-11 rounded-lg border border-gray-300 bg-white px-3 text-sm">
+            <option value="all">Todas categorias</option>
+            {expenseCategories.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
           </select>
         </div>
 
@@ -134,7 +144,12 @@ export default function ListaPage() {
                       {item.card ? <span className="size-2.5 rounded-full" style={{ background: item.card.color }} /> : null}
                       <p className="truncate font-semibold">{item.title}</p>
                     </div>
-                    <p className="text-sm text-gray-500">{labelType(item.type)} - {formatDateBr(item.date)}</p>
+                    <p className="text-sm text-gray-500">
+                      {labelType(item.type)}
+                      {item.category ? ` - ${getCategoryLabel(item.category)}` : ""}
+                      {" - "}
+                      {formatDateBr(item.date)}
+                    </p>
                   </div>
                   <div className="text-right">
                     <p className={`font-bold ${item.type === "entry" ? "text-emerald-600" : "text-gray-950"}`}>{formatCurrency(item.amount)}</p>

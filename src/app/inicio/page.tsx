@@ -8,6 +8,7 @@ import { ConfigNotice } from "@/components/layout/ConfigNotice";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { currentMonthValue, formatDateBr, monthLabel } from "@/lib/dates/format";
+import { expenseCategories, getCategoryLabel } from "@/lib/finance/categories";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import { fetchMonthData, updateStatus, type MonthData } from "@/features/finance/api";
@@ -59,6 +60,29 @@ export default function InicioPage() {
     }));
   }, [data]);
 
+  const categoryTotals = useMemo(() => {
+    const totals = new Map<string, number>();
+    for (const category of expenseCategories) totals.set(category.value, 0);
+
+    for (const expense of data?.expenses ?? []) {
+      totals.set(expense.category, (totals.get(expense.category) ?? 0) + Number(expense.amount));
+    }
+
+    for (const installment of data?.installments ?? []) {
+      totals.set(installment.category, (totals.get(installment.category) ?? 0) + Number(installment.amount));
+    }
+
+    return expenseCategories
+      .map((category) => ({
+        ...category,
+        total: totals.get(category.value) ?? 0,
+      }))
+      .filter((category) => category.total > 0)
+      .sort((a, b) => b.total - a.total);
+  }, [data]);
+
+  const maxCategoryTotal = categoryTotals[0]?.total ?? 0;
+
   async function toggle(table: "expenses" | "card_installments", id: string, status: PaymentStatus) {
     await updateStatus(createClient(), table, id, status === "paid" ? "pending" : "paid");
     await load();
@@ -87,6 +111,36 @@ export default function InicioPage() {
           <SummaryCard label="Saldo previsto" value={summary.balance} tone={summary.balance >= 0 ? "green" : "red"} wide />
         </section>
 
+        <section className="mb-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="font-bold">Gastos por categoria</h2>
+              <p className="text-sm text-gray-500">Resumo do mes selecionado</p>
+            </div>
+            <p className="text-sm font-bold text-gray-900">{formatCurrency(summary.spent)}</p>
+          </div>
+          {categoryTotals.length === 0 ? (
+            <p className="text-sm text-gray-500">Nenhum gasto registrado neste mes.</p>
+          ) : (
+            <div className="space-y-3">
+              {categoryTotals.map((category) => (
+                <div key={category.value}>
+                  <div className="mb-1 flex items-center justify-between gap-3 text-sm">
+                    <span className="font-medium text-gray-700">{category.label}</span>
+                    <span className="font-bold text-gray-950">{formatCurrency(category.total)}</span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className="h-full rounded-full bg-gray-900"
+                      style={{ width: `${maxCategoryTotal ? Math.max((category.total / maxCategoryTotal) * 100, 6) : 0}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         <section className="space-y-5">
           <div className="flex items-center gap-2">
             <WalletCards size={20} />
@@ -108,6 +162,7 @@ export default function InicioPage() {
                   <PaymentRow
                     key={item.id}
                     title={`${item.description} ${item.installment_number}/${item.installments_count}`}
+                    subtitle={getCategoryLabel(item.category)}
                     amount={Number(item.amount)}
                     date={item.due_date}
                     status={item.status}
@@ -156,7 +211,7 @@ function SummaryCard({ label, value, tone, wide }: { label: string; value: numbe
   );
 }
 
-function PaymentRow({ title, amount, date, status, onToggle }: { title: string; amount: number; date: string; status: PaymentStatus; onToggle: () => void }) {
+function PaymentRow({ title, subtitle, amount, date, status, onToggle }: { title: string; subtitle?: string; amount: number; date: string; status: PaymentStatus; onToggle: () => void }) {
   const Icon = status === "paid" ? CheckCircle2 : Circle;
   return (
     <div className="flex items-center gap-3 p-4">
@@ -165,7 +220,7 @@ function PaymentRow({ title, amount, date, status, onToggle }: { title: string; 
       </button>
       <div className="min-w-0 flex-1">
         <p className="truncate font-semibold">{title}</p>
-        <p className="text-sm text-gray-500">{formatDateBr(date)}</p>
+        <p className="text-sm text-gray-500">{subtitle ? `${subtitle} - ` : ""}{formatDateBr(date)}</p>
       </div>
       <div className="text-right">
         <p className="font-bold">{formatCurrency(amount)}</p>
@@ -190,6 +245,7 @@ function GroupedExpenses({ expenses, onToggle }: { expenses: Expense[]; onToggle
             <PaymentRow
               key={expense.id}
               title={`${expense.description} - ${labels[expense.payment_method]}`}
+              subtitle={getCategoryLabel(expense.category)}
               amount={Number(expense.amount)}
               date={expense.due_date}
               status={expense.status}

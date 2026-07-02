@@ -1,5 +1,16 @@
 export type PaymentStatus = "pending" | "paid";
 export type PaymentMethod = "pix" | "cash" | "debit" | "boleto" | "other";
+export type ExpenseCategory =
+  | "food"
+  | "housing"
+  | "transport"
+  | "subscriptions"
+  | "leisure"
+  | "health"
+  | "gifts"
+  | "personal"
+  | "education"
+  | "other";
 
 export type Card = {
   id: string;
@@ -32,6 +43,7 @@ export type Expense = {
   amount: number;
   due_date: string;
   payment_method: PaymentMethod;
+  category: ExpenseCategory;
   status: PaymentStatus;
   notes: string | null;
   created_at: string;
@@ -44,6 +56,7 @@ export type CardPurchase = {
   card_id: string;
   description: string;
   purchase_date: string;
+  category: ExpenseCategory;
   installment_amount: number;
   installments_count: number;
   start_installment: number;
@@ -61,6 +74,7 @@ export type CardInstallment = {
   installment_number: number;
   installments_count: number;
   amount: number;
+  category: ExpenseCategory;
   invoice_month: number;
   invoice_year: number;
   due_date: string;

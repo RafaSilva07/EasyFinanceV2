@@ -93,7 +93,7 @@ export async function createEntry(
 
 export async function createExpense(
   supabase: SupabaseClient,
-  values: Pick<Expense, "description" | "amount" | "due_date" | "payment_method" | "status" | "notes">,
+  values: Pick<Expense, "description" | "amount" | "due_date" | "payment_method" | "category" | "status" | "notes">,
 ) {
   const user_id = await currentUserId(supabase);
   const { error } = await supabase.from("expenses").insert({ ...values, user_id });
@@ -106,6 +106,7 @@ export async function createCardPurchase(
     card: Card;
     description: string;
     purchase_date: string;
+    category: CardPurchase["category"];
     installment_amount: number;
     installments_count: number;
     start_installment: number;
@@ -120,6 +121,7 @@ export async function createCardPurchase(
       card_id: values.card.id,
       description: values.description,
       purchase_date: values.purchase_date,
+      category: values.category,
       installment_amount: values.installment_amount,
       installments_count: values.installments_count,
       start_installment: values.start_installment,
@@ -148,6 +150,7 @@ export async function createCardPurchase(
         installment_number: installmentNumber,
         installments_count: values.installments_count,
         amount: values.installment_amount,
+        category: values.category,
         invoice_month: dueDate.getMonth() + 1,
         invoice_year: dueDate.getFullYear(),
         due_date: toIsoDate(dueDate),

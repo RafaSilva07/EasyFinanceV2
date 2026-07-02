@@ -37,6 +37,7 @@ create table if not exists public.expenses (
   amount numeric(12,2) not null,
   due_date date not null,
   payment_method text not null check (payment_method in ('pix', 'cash', 'debit', 'boleto', 'other')),
+  category text not null default 'other' check (category in ('food', 'housing', 'transport', 'subscriptions', 'leisure', 'health', 'gifts', 'personal', 'education', 'other')),
   status text not null default 'pending' check (status in ('pending', 'paid')),
   notes text,
   created_at timestamp with time zone default now(),
@@ -49,6 +50,7 @@ create table if not exists public.card_purchases (
   card_id uuid not null references public.cards(id) on delete cascade,
   description text not null,
   purchase_date date not null,
+  category text not null default 'other' check (category in ('food', 'housing', 'transport', 'subscriptions', 'leisure', 'health', 'gifts', 'personal', 'education', 'other')),
   installment_amount numeric(12,2) not null,
   installments_count integer not null default 1 check (installments_count >= 1),
   start_installment integer not null default 1 check (start_installment >= 1),
@@ -67,6 +69,7 @@ create table if not exists public.card_installments (
   installment_number integer not null,
   installments_count integer not null,
   amount numeric(12,2) not null,
+  category text not null default 'other' check (category in ('food', 'housing', 'transport', 'subscriptions', 'leisure', 'health', 'gifts', 'personal', 'education', 'other')),
   invoice_month integer not null check (invoice_month between 1 and 12),
   invoice_year integer not null,
   due_date date not null,
@@ -78,7 +81,9 @@ create table if not exists public.card_installments (
 create index if not exists cards_user_idx on public.cards(user_id);
 create index if not exists entries_user_date_idx on public.entries(user_id, date);
 create index if not exists expenses_user_due_idx on public.expenses(user_id, due_date);
+create index if not exists expenses_user_category_idx on public.expenses(user_id, category);
 create index if not exists installments_user_invoice_idx on public.card_installments(user_id, invoice_year, invoice_month);
+create index if not exists installments_user_category_idx on public.card_installments(user_id, category);
 
 alter table public.profiles enable row level security;
 alter table public.cards enable row level security;

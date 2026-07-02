@@ -9,6 +9,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
 import { createCardPurchase, createEntry, createExpense, fetchCards } from "@/features/finance/api";
+import { expenseCategories } from "@/lib/finance/categories";
 import { formatCurrency, toNumber } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import type { Card } from "@/types/finance";
@@ -30,6 +31,7 @@ const expenseSchema = z.object({
   amount: money,
   due_date: z.string().min(1, "Informe a data"),
   payment_method: z.enum(["pix", "cash", "debit", "boleto", "other"]),
+  category: z.enum(["food", "housing", "transport", "subscriptions", "leisure", "health", "gifts", "personal", "education", "other"]),
   status: z.enum(["pending", "paid"]),
   notes: optionalText,
 });
@@ -38,6 +40,7 @@ const purchaseSchema = z.object({
   description: z.string().min(1, "Informe a descricao"),
   card_id: z.string().min(1, "Escolha um cartao"),
   purchase_date: z.string().min(1, "Informe a data"),
+  category: z.enum(["food", "housing", "transport", "subscriptions", "leisure", "health", "gifts", "personal", "education", "other"]),
   installment_amount: money,
   installments_count: z.coerce.number().int().min(1, "Minimo 1 parcela"),
   start_installment: z.coerce.number().int().min(1, "Minimo 1"),
@@ -126,12 +129,12 @@ function EntryFormView({ onDone, onError }: { onDone: (value: string) => void; o
 function ExpenseFormView({ onDone, onError }: { onDone: (value: string) => void; onError: (value: string) => void }) {
   const form = useForm<ExpenseInput, unknown, ExpenseForm>({
     resolver: zodResolver(expenseSchema),
-    defaultValues: { due_date: today(), payment_method: "pix", status: "pending", description: "", amount: "", notes: "" },
+    defaultValues: { due_date: today(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" },
   });
   async function submit(values: ExpenseForm) {
     try {
       await createExpense(createClient(), values);
-      form.reset({ due_date: today(), payment_method: "pix", status: "pending", description: "", amount: "", notes: "" });
+      form.reset({ due_date: today(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" });
       onDone("Gasto registrado.");
       onError("");
     } catch (err) {
@@ -150,6 +153,7 @@ function ExpenseFormView({ onDone, onError }: { onDone: (value: string) => void;
         <option value="boleto">Boleto</option>
         <option value="other">Outro</option>
       </Select>
+      <CategorySelect {...form.register("category")} />
       <Select label="Status" {...form.register("status")}>
         <option value="pending">Pendente</option>
         <option value="paid">Pago</option>
@@ -162,7 +166,7 @@ function ExpenseFormView({ onDone, onError }: { onDone: (value: string) => void;
 function PurchaseFormView({ cards, onDone, onError }: { cards: Card[]; onDone: (value: string) => void; onError: (value: string) => void }) {
   const form = useForm<PurchaseInput, unknown, PurchaseForm>({
     resolver: zodResolver(purchaseSchema),
-    defaultValues: { purchase_date: today(), installments_count: 1, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" },
+    defaultValues: { purchase_date: today(), category: "other", installments_count: 1, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" },
   });
   const watchedAmount = useWatch({ control: form.control, name: "installment_amount" });
   const watchedCount = useWatch({ control: form.control, name: "installments_count" });
@@ -178,7 +182,7 @@ function PurchaseFormView({ cards, onDone, onError }: { cards: Card[]; onDone: (
     }
     try {
       await createCardPurchase(createClient(), { ...values, card });
-      form.reset({ purchase_date: today(), installments_count: 1, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
+      form.reset({ purchase_date: today(), category: "other", installments_count: 1, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
       onDone("Compra no cartao registrada.");
       onError("");
     } catch (err) {
@@ -194,6 +198,7 @@ function PurchaseFormView({ cards, onDone, onError }: { cards: Card[]; onDone: (
         {cards.map((card) => <option key={card.id} value={card.id}>{card.name}</option>)}
       </Select>
       <TextInput label="Data original da compra" type="date" error={form.formState.errors.purchase_date?.message} {...form.register("purchase_date")} />
+      <CategorySelect {...form.register("category")} />
       <TextInput label="Valor da parcela" inputMode="decimal" placeholder="120,00" error={form.formState.errors.installment_amount?.message} {...form.register("installment_amount")} />
       <TextInput label="Quantidade de parcelas" type="number" min="1" error={form.formState.errors.installments_count?.message} {...form.register("installments_count")} />
       <TextInput label="Parcela inicial no sistema" type="number" min="1" error={form.formState.errors.start_installment?.message} {...form.register("start_installment")} />
@@ -234,6 +239,18 @@ function Select({ label, error, children, ...props }: React.SelectHTMLAttributes
       <select {...props} className="h-12 w-full rounded-lg border border-gray-300 bg-white px-3 outline-none focus:border-gray-900">{children}</select>
       {error ? <span className="mt-1 block text-xs text-red-600">{error}</span> : null}
     </label>
+  );
+}
+
+function CategorySelect(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <Select label="Categoria" {...props}>
+      {expenseCategories.map((category) => (
+        <option key={category.value} value={category.value}>
+          {category.label}
+        </option>
+      ))}
+    </Select>
   );
 }
 
