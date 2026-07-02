@@ -15,7 +15,11 @@ import { fetchMonthData, updateStatus, type MonthData } from "@/features/finance
 import type { Expense, PaymentStatus } from "@/types/finance";
 
 export default function InicioPage() {
-  const [month, setMonth] = useState(currentMonthValue());
+  const [month, setMonth] = useState(() => {
+    if (typeof window === "undefined") return currentMonthValue();
+    const params = new URLSearchParams(window.location.search);
+    return params.get("mes") ?? currentMonthValue();
+  });
   const [data, setData] = useState<MonthData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);

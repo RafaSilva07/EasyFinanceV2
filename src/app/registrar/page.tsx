@@ -4,12 +4,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Banknote, CreditCard, Receipt } from "lucide-react";
+import Link from "next/link";
+import { Banknote, CheckCircle2, CreditCard, Receipt, XCircle } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
 import { createCardPurchase, createEntry, createExpense, fetchCards } from "@/features/finance/api";
 import { expenseCategories } from "@/lib/finance/categories";
+import { formatDateBr, monthLabel } from "@/lib/dates/format";
 import { formatCurrency, toNumber } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import type { Card } from "@/types/finance";
@@ -57,12 +59,18 @@ type ExpenseInput = z.input<typeof expenseSchema>;
 type ExpenseForm = z.output<typeof expenseSchema>;
 type PurchaseInput = z.input<typeof purchaseSchema>;
 type PurchaseForm = z.output<typeof purchaseSchema>;
+type Feedback = {
+  tone: "success" | "error";
+  title: string;
+  description?: string;
+  href?: string;
+  hrefLabel?: string;
+};
 
 export default function RegistrarPage() {
   const [mode, setMode] = useState<Mode>("expense");
   const [cards, setCards] = useState<Card[]>([]);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
 
   async function loadCards() {
     if (!hasSupabaseConfig()) return;
@@ -82,13 +90,42 @@ export default function RegistrarPage() {
           <ModeButton active={mode === "expense"} label="Gasto" icon={<Receipt size={19} />} onClick={() => setMode("expense")} />
           <ModeButton active={mode === "purchase"} label="Cartao" icon={<CreditCard size={19} />} onClick={() => setMode("purchase")} />
         </div>
-        {message ? <p className="mb-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-700">{message}</p> : null}
-        {error ? <p className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
-        {mode === "entry" ? <EntryFormView onDone={setMessage} onError={setError} /> : null}
-        {mode === "expense" ? <ExpenseFormView onDone={setMessage} onError={setError} /> : null}
-        {mode === "purchase" ? <PurchaseFormView cards={cards} onDone={setMessage} onError={setError} /> : null}
+        {feedback ? <ActionFeedback feedback={feedback} onClose={() => setFeedback(null)} /> : null}
+        {mode === "entry" ? <EntryFormView onFeedback={setFeedback} /> : null}
+        {mode === "expense" ? <ExpenseFormView onFeedback={setFeedback} /> : null}
+        {mode === "purchase" ? <PurchaseFormView cards={cards} onFeedback={setFeedback} /> : null}
       </AppShell>
     </AuthGuard>
+  );
+}
+
+function ActionFeedback({ feedback, onClose }: { feedback: Feedback; onClose: () => void }) {
+  const isSuccess = feedback.tone === "success";
+  const Icon = isSuccess ? CheckCircle2 : XCircle;
+  return (
+    <div
+      className={`mb-4 rounded-lg border p-4 shadow-sm ${
+        isSuccess ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-red-200 bg-red-50 text-red-900"
+      }`}
+    >
+      <div className="flex gap-3">
+        <Icon className="mt-0.5 shrink-0" size={22} />
+        <div className="min-w-0 flex-1">
+          <p className="font-bold">{feedback.title}</p>
+          {feedback.description ? <p className="mt-1 text-sm leading-5">{feedback.description}</p> : null}
+          <div className="mt-3 flex flex-wrap gap-2">
+            {feedback.href && feedback.hrefLabel ? (
+              <Link href={feedback.href} className="rounded-lg bg-gray-950 px-3 py-2 text-sm font-bold text-white">
+                {feedback.hrefLabel}
+              </Link>
+            ) : null}
+            <button type="button" onClick={onClose} className="rounded-lg border border-current/20 px-3 py-2 text-sm font-bold">
+              Fechar
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -101,7 +138,7 @@ function ModeButton({ active, label, icon, onClick }: { active: boolean; label: 
   );
 }
 
-function EntryFormView({ onDone, onError }: { onDone: (value: string) => void; onError: (value: string) => void }) {
+function EntryFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
   const form = useForm<EntryInput, unknown, EntryForm>({
     resolver: zodResolver(entrySchema),
     defaultValues: { date: today(), description: "", amount: "", notes: "" },
@@ -110,10 +147,16 @@ function EntryFormView({ onDone, onError }: { onDone: (value: string) => void; o
     try {
       await createEntry(createClient(), values);
       form.reset({ date: today(), description: "", amount: "", notes: "" });
-      onDone("Entrada registrada.");
-      onError("");
+      const monthValue = values.date.slice(0, 7);
+      onFeedback({
+        tone: "success",
+        title: "Entrada registrada",
+        description: `Ela ja aparece em ${monthLabel(monthValue)}.`,
+        href: `/inicio?mes=${monthValue}`,
+        hrefLabel: "Ver no Inicio",
+      });
     } catch (err) {
-      onError(err instanceof Error ? err.message : "Erro ao salvar entrada.");
+      onFeedback({ tone: "error", title: "Nao foi possivel salvar a entrada", description: err instanceof Error ? err.message : "Tente novamente." });
     }
   }
   return (
@@ -126,7 +169,7 @@ function EntryFormView({ onDone, onError }: { onDone: (value: string) => void; o
   );
 }
 
-function ExpenseFormView({ onDone, onError }: { onDone: (value: string) => void; onError: (value: string) => void }) {
+function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
   const form = useForm<ExpenseInput, unknown, ExpenseForm>({
     resolver: zodResolver(expenseSchema),
     defaultValues: { due_date: today(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" },
@@ -135,10 +178,16 @@ function ExpenseFormView({ onDone, onError }: { onDone: (value: string) => void;
     try {
       await createExpense(createClient(), values);
       form.reset({ due_date: today(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" });
-      onDone("Gasto registrado.");
-      onError("");
+      const monthValue = values.due_date.slice(0, 7);
+      onFeedback({
+        tone: "success",
+        title: "Gasto registrado",
+        description: `Ele ja aparece em ${monthLabel(monthValue)} como ${values.status === "paid" ? "pago" : "pendente"}.`,
+        href: `/inicio?mes=${monthValue}`,
+        hrefLabel: "Ver no Inicio",
+      });
     } catch (err) {
-      onError(err instanceof Error ? err.message : "Erro ao salvar gasto.");
+      onFeedback({ tone: "error", title: "Nao foi possivel salvar o gasto", description: err instanceof Error ? err.message : "Tente novamente." });
     }
   }
   return (
@@ -163,7 +212,7 @@ function ExpenseFormView({ onDone, onError }: { onDone: (value: string) => void;
   );
 }
 
-function PurchaseFormView({ cards, onDone, onError }: { cards: Card[]; onDone: (value: string) => void; onError: (value: string) => void }) {
+function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (value: Feedback) => void }) {
   const form = useForm<PurchaseInput, unknown, PurchaseForm>({
     resolver: zodResolver(purchaseSchema),
     defaultValues: { purchase_date: today(), category: "other", installments_count: 1, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" },
@@ -177,16 +226,28 @@ function PurchaseFormView({ cards, onDone, onError }: { cards: Card[]; onDone: (
   async function submit(values: PurchaseForm) {
     const card = cards.find((item) => item.id === values.card_id);
     if (!card) {
-      onError("Escolha um cartao valido.");
+      onFeedback({ tone: "error", title: "Escolha um cartao valido" });
       return;
     }
     try {
-      await createCardPurchase(createClient(), { ...values, card });
+      const result = await createCardPurchase(createClient(), { ...values, card });
+      const firstInstallment = result.installments[0];
+      const lastInstallment = result.installments.at(-1);
+      const monthValue = `${firstInstallment.invoice_year}-${String(firstInstallment.invoice_month).padStart(2, "0")}`;
+      const createdCount = result.installments.length;
       form.reset({ purchase_date: today(), category: "other", installments_count: 1, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
-      onDone("Compra no cartao registrada.");
-      onError("");
+      onFeedback({
+        tone: "success",
+        title: "Compra no cartao registrada",
+        description:
+          createdCount === 1
+            ? `A parcela vence em ${formatDateBr(firstInstallment.due_date)} e aparece em ${monthLabel(monthValue)}.`
+            : `${createdCount} parcelas foram criadas. A primeira aparece em ${monthLabel(monthValue)} e a ultima vence em ${formatDateBr(lastInstallment?.due_date ?? firstInstallment.due_date)}.`,
+        href: `/inicio?mes=${monthValue}`,
+        hrefLabel: `Ver ${monthLabel(monthValue)}`,
+      });
     } catch (err) {
-      onError(err instanceof Error ? err.message : "Erro ao salvar compra.");
+      onFeedback({ tone: "error", title: "Nao foi possivel salvar a compra", description: err instanceof Error ? err.message : "Tente novamente." });
     }
   }
   return (

@@ -161,6 +161,11 @@ export async function createCardPurchase(
 
   const { error: installmentsError } = await supabase.from("card_installments").insert(installments);
   if (installmentsError) throw installmentsError;
+
+  return {
+    purchase: purchase as CardPurchase,
+    installments,
+  };
 }
 
 export async function updateStatus(
