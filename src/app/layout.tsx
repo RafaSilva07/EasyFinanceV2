@@ -16,6 +16,11 @@ export const metadata: Metadata = {
   title: "Meu Controle Financeiro",
   description: "Controle financeiro mensal simples, mobile-first e instalavel.",
   manifest: "/manifest.webmanifest",
+  icons: {
+    icon: "/icon.svg",
+    shortcut: "/icon.svg",
+    apple: "/icon.svg",
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
