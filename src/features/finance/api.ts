@@ -22,6 +22,10 @@ export type MonthData = {
   invoices: (CardInvoiceWithCard & { card_installments: CardInstallment[] })[];
 };
 
+export type CardPurchaseDetails = CardPurchaseWithProgress & {
+  card_installments: (CardInstallment & { card_invoices?: CardInvoice | null })[];
+};
+
 async function currentUserId(supabase: SupabaseClient) {
   const { data, error } = await supabase.auth.getUser();
   if (error || !data.user) throw new Error("Usuario nao autenticado.");
@@ -109,6 +113,37 @@ export async function fetchListData(
     expenses: (expenses.data ?? []) as Expense[],
     purchases: activePurchases,
   };
+}
+
+export async function fetchCardPurchaseDetails(
+  supabase: SupabaseClient,
+  purchaseId: string,
+): Promise<CardPurchaseDetails> {
+  const { data, error } = await supabase
+    .from("card_purchases")
+    .select("*, cards(*), card_installments(*, card_invoices(*))")
+    .eq("id", purchaseId)
+    .single();
+
+  if (error) throw error;
+
+  const installments = ((data.card_installments ?? []) as (CardInstallment & { card_invoices?: CardInvoice | null })[])
+    .slice()
+    .sort((a, b) => a.installment_number - b.installment_number);
+  const paidInstallments = installments.filter((installment) => installment.card_invoices?.status === "paid").length;
+  const nextDueDate =
+    installments
+      .filter((installment) => installment.card_invoices?.status !== "paid")
+      .sort((a, b) => a.due_date.localeCompare(b.due_date))[0]?.due_date ?? null;
+
+  return {
+    ...data,
+    card_installments: installments,
+    paid_installments: paidInstallments,
+    active_installments: installments.length,
+    next_due_date: nextDueDate,
+    has_paid_invoice: paidInstallments > 0,
+  } as CardPurchaseDetails;
 }
 
 export async function saveCard(

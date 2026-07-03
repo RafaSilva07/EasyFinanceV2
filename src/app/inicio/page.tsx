@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CheckCircle2, ChevronDown, Circle, WalletCards } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
@@ -200,6 +201,7 @@ export default function InicioPage() {
                     {invoice.card_installments.map((item) => (
                       <InvoiceInstallmentRow
                         key={item.id}
+                        href={`/compras/${item.card_purchase_id}`}
                         title={`${item.description} ${item.installment_number}/${item.installments_count}`}
                         category={item.category}
                         amount={Number(item.amount)}
@@ -273,10 +275,10 @@ function PaymentRow({ title, subtitle, amount, date, status, onToggle }: { title
   );
 }
 
-function InvoiceInstallmentRow({ title, category, amount, date }: { title: string; category: CardInstallment["category"]; amount: number; date: string }) {
+function InvoiceInstallmentRow({ href, title, category, amount, date }: { href: string; title: string; category: CardInstallment["category"]; amount: number; date: string }) {
   const categoryMeta = getCategoryMeta(category);
   return (
-    <div className="flex items-center gap-3 p-4">
+    <Link href={href} className="flex items-center gap-3 p-4 transition hover:bg-gray-50 active:bg-gray-100">
       <div className={`grid size-7 shrink-0 place-items-center rounded-full text-xs font-bold ${categoryMeta.badgeClass}`}>
         {categoryMeta.initial}
       </div>
@@ -285,7 +287,7 @@ function InvoiceInstallmentRow({ title, category, amount, date }: { title: strin
         <p className="text-sm text-gray-500">{categoryMeta.label} - {formatDateBr(date)}</p>
       </div>
       <p className="font-bold">{formatCurrency(amount)}</p>
-    </div>
+    </Link>
   );
 }
 
