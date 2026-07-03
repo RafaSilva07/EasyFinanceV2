@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { CreditCard, Home, ListFilter, LogOut, PlusCircle } from "lucide-react";
+import { CreditCard, Home, Landmark, ListFilter, LogOut, PlusCircle } from "lucide-react";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 
 const nav = [
@@ -10,6 +10,7 @@ const nav = [
   { href: "/registrar", label: "Registrar", icon: PlusCircle },
   { href: "/cartoes", label: "Cartoes", icon: CreditCard },
   { href: "/lista", label: "Lista", icon: ListFilter },
+  { href: "/caixa", label: "Caixa", icon: Landmark },
 ];
 
 export function AppShell({
@@ -56,7 +57,7 @@ export function AppShell({
       <main className="mx-auto w-full max-w-5xl px-4 py-5">{children}</main>
 
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-gray-200 bg-white">
-        <div className="mx-auto grid max-w-5xl grid-cols-4 px-2 pb-[env(safe-area-inset-bottom)]">
+        <div className="mx-auto grid max-w-5xl grid-cols-5 px-2 pb-[env(safe-area-inset-bottom)]">
           {nav.map((item) => {
             const Icon = item.icon;
             const active = pathname.startsWith(item.href);

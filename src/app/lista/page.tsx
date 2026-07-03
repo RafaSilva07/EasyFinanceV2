@@ -12,7 +12,7 @@ import { currentMonthRange, formatDateBr } from "@/lib/dates/format";
 import { expenseCategories, getCategoryLabel } from "@/lib/finance/categories";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import type { Card, CardPurchaseWithProgress, Expense, ExpenseCategory, PaymentStatus } from "@/types/finance";
+import type { Card, CardPurchaseWithProgress, Expense, ExpenseCategory, Payable, PaymentStatus } from "@/types/finance";
 
 const maskDateBr = (value: string) => {
   const digits = value.replace(/\D/g, "").slice(0, 8);
@@ -45,6 +45,16 @@ type ListItem =
       title: string;
       amount: number;
       date: string;
+      status: PaymentStatus;
+      category: ExpenseCategory;
+    }
+  | {
+      id: string;
+      type: "payable";
+      title: string;
+      amount: number;
+      date: string;
+      purchaseDate: string;
       status: PaymentStatus;
       category: ExpenseCategory;
     }
@@ -101,6 +111,16 @@ export default function ListaPage() {
           status: item.status,
           category: item.category,
         })),
+        ...data.payables.map((item: Payable) => ({
+          id: item.id,
+          type: "payable" as const,
+          title: item.description,
+          amount: Number(item.amount),
+          date: item.due_date,
+          purchaseDate: item.purchase_date,
+          status: item.status,
+          category: item.category,
+        })),
         ...data.purchases.map((item) => ({
           id: item.id,
           type: "purchase" as const,
@@ -128,13 +148,15 @@ export default function ListaPage() {
   const filtered = useMemo(() => {
     return items.filter((item) => {
       if (type !== "all" && item.type !== type) return false;
-      if (item.type === "purchase" && viewMode === "purchases" && (item.date < startDate || item.date > endDate)) return false;
+      if (item.type === "purchase" && viewMode === "purchases" && item.date < startDate && !item.hasInvoiceInRange) return false;
+      if (item.type === "purchase" && viewMode === "purchases" && item.date > endDate && !item.hasInvoiceInRange) return false;
       if (item.type === "purchase" && viewMode === "open-invoices" && !item.hasOpenInvoiceInRange) return false;
       if (item.type === "purchase" && viewMode === "invoice-range" && !item.hasInvoiceInRange) return false;
       if (item.type !== "purchase" && viewMode !== "purchases") return false;
       if (item.type === "purchase" && status === "paid" && item.purchase.paid_installments < item.purchase.active_installments) return false;
       if (item.type === "purchase" && status === "pending" && item.purchase.paid_installments >= item.purchase.active_installments) return false;
       if (item.type === "expense" && status !== "all" && item.status !== status) return false;
+      if (item.type === "payable" && status !== "all" && item.status !== status) return false;
       if (item.type === "entry" && status !== "all") return false;
       if (card !== "all" && (item.type !== "purchase" || item.cardId !== card)) return false;
       if (category !== "all" && item.type !== "entry" && item.category !== category) return false;
@@ -144,6 +166,11 @@ export default function ListaPage() {
 
   async function toggleExpense(item: Extract<ListItem, { type: "expense" }>) {
     await updateStatus(createClient(), "expenses", item.id, item.status === "paid" ? "pending" : "paid");
+    await load();
+  }
+
+  async function togglePayable(item: Extract<ListItem, { type: "payable" }>) {
+    await updateStatus(createClient(), "payables", item.id, item.status === "paid" ? "pending" : "paid");
     await load();
   }
 
@@ -190,6 +217,7 @@ export default function ListaPage() {
             <option value="all">Todos os tipos</option>
             <option value="entry">Entradas</option>
             <option value="expense">Gastos simples</option>
+            <option value="payable">Contas a pagar</option>
             <option value="purchase">Compras no cartao</option>
           </select>
           </label>
@@ -226,11 +254,11 @@ export default function ListaPage() {
                 return <PurchaseRow key={`purchase-${item.id}`} item={item} onEdit={() => setEditing(item)} onCancel={() => cancelPurchase(item)} />;
               }
 
-              const Icon = item.type === "expense" && item.status === "paid" ? CheckCircle2 : Circle;
+              const Icon = (item.type === "expense" || item.type === "payable") && item.status === "paid" ? CheckCircle2 : Circle;
               return (
                 <div key={`${item.type}-${item.id}`} className="flex items-center gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-                  {item.type === "expense" ? (
-                    <button type="button" onClick={() => toggleExpense(item)} aria-label="Alternar status" title="Alternar status" className="text-gray-800">
+                  {item.type === "expense" || item.type === "payable" ? (
+                    <button type="button" onClick={() => item.type === "expense" ? toggleExpense(item) : togglePayable(item)} aria-label="Alternar status" title="Alternar status" className="text-gray-800">
                       <Icon size={24} />
                     </button>
                   ) : (
@@ -240,14 +268,15 @@ export default function ListaPage() {
                     <p className="truncate font-semibold">{item.title}</p>
                     <p className="text-sm text-gray-500">
                       {labelType(item.type)}
-                      {item.type === "expense" ? ` - ${getCategoryLabel(item.category)}` : ""}
+                      {item.type === "expense" || item.type === "payable" ? ` - ${getCategoryLabel(item.category)}` : ""}
                       {" - "}
                       {formatDateBr(item.date)}
+                      {item.type === "payable" ? ` - compra em ${formatDateBr(item.purchaseDate)}` : ""}
                     </p>
                   </div>
                   <div className="text-right">
                     <p className={`font-bold ${item.type === "entry" ? "text-emerald-600" : "text-gray-950"}`}>{formatCurrency(item.amount)}</p>
-                    {item.type === "expense" ? <StatusBadge status={item.status} /> : null}
+                    {item.type === "expense" || item.type === "payable" ? <StatusBadge status={item.status} /> : null}
                   </div>
                 </div>
               );
@@ -280,6 +309,7 @@ function PurchaseRow({ item, onEdit, onCancel }: { item: Extract<ListItem, { typ
   const subtitle = isSingle
     ? `A vista - ${getCategoryLabel(item.category)} - compra em ${formatDateBr(item.date)}`
     : `Parcelada - ${paid}/${total} parcelas pagas - ${getCategoryLabel(item.category)}`;
+  const recurringText = purchase.is_recurring ? ` - Assinatura ${purchase.recurring_status === "active" ? "ativa" : "inativa"}` : "";
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
@@ -287,7 +317,7 @@ function PurchaseRow({ item, onEdit, onCancel }: { item: Extract<ListItem, { typ
         <span className="mt-1 size-2.5 shrink-0 rounded-full" style={{ background: item.card?.color ?? "#3B82F6" }} />
         <div className="min-w-0 flex-1">
           <p className="truncate font-semibold">{item.title}</p>
-          <p className="text-sm text-gray-500">{subtitle}</p>
+          <p className="text-sm text-gray-500">{subtitle}{recurringText}</p>
           {purchase.next_due_date ? <p className="mt-1 text-xs text-gray-500">Proxima fatura: {formatDateBr(purchase.next_due_date)}</p> : null}
           <div className="mt-3 flex gap-2">
             <button type="button" onClick={onEdit} className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-bold text-gray-700">
@@ -327,6 +357,8 @@ function EditPurchaseDialog({
   const [installmentAmount, setInstallmentAmount] = useState(String(purchase.installment_amount).replace(".", ","));
   const [installmentsCount, setInstallmentsCount] = useState(String(purchase.installments_count));
   const [startInstallment, setStartInstallment] = useState(String(purchase.start_installment));
+  const [isRecurring, setIsRecurring] = useState(purchase.is_recurring);
+  const [recurringStatus, setRecurringStatus] = useState<"active" | "inactive">(purchase.recurring_status);
   const [notes, setNotes] = useState(purchase.notes ?? "");
   const [saving, setSaving] = useState(false);
 
@@ -351,8 +383,10 @@ function EditPurchaseDialog({
         purchase_date: brToIso(purchaseDate),
         category,
         installment_amount: Number(installmentAmount.replace(/\./g, "").replace(",", ".")),
-        installments_count: Number(installmentsCount),
+        installments_count: category === "subscriptions" && isRecurring && recurringStatus === "active" ? 12 : Number(installmentsCount),
         start_installment: Number(startInstallment),
+        is_recurring: category === "subscriptions" && isRecurring,
+        recurring_status: category === "subscriptions" && isRecurring ? recurringStatus : "inactive",
         notes: notes.trim() || null,
       });
       await onSaved();
@@ -383,10 +417,47 @@ function EditPurchaseDialog({
           <EditField label="Data original" value={purchaseDate} onChange={(value) => setPurchaseDate(maskDateBr(value))} inputMode="numeric" />
           <label className="block">
             <span className="mb-1 block text-sm font-medium text-gray-700">Categoria</span>
-            <select value={category} onChange={(event) => setCategory(event.target.value as ExpenseCategory)} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3">
+            <select
+              value={category}
+              onChange={(event) => {
+                const nextCategory = event.target.value as ExpenseCategory;
+                setCategory(nextCategory);
+                if (nextCategory !== "subscriptions") {
+                  setIsRecurring(false);
+                  setRecurringStatus("inactive");
+                }
+              }}
+              className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3"
+            >
               {expenseCategories.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
           </label>
+          {category === "subscriptions" ? (
+            <>
+              <label className="flex min-h-12 items-center justify-between rounded-lg border border-gray-200 px-3">
+                <span className="text-sm font-medium text-gray-700">Assinatura recorrente</span>
+                <input
+                  type="checkbox"
+                  checked={isRecurring}
+                  onChange={(event) => {
+                    setIsRecurring(event.target.checked);
+                    setRecurringStatus(event.target.checked ? "active" : "inactive");
+                    if (event.target.checked) setInstallmentsCount("12");
+                  }}
+                  className="size-5 accent-gray-950"
+                />
+              </label>
+              {isRecurring ? (
+                <label className="block">
+                  <span className="mb-1 block text-sm font-medium text-gray-700">Status da assinatura</span>
+                  <select value={recurringStatus} onChange={(event) => setRecurringStatus(event.target.value as "active" | "inactive")} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3">
+                    <option value="active">Ativa</option>
+                    <option value="inactive">Inativa</option>
+                  </select>
+                </label>
+              ) : null}
+            </>
+          ) : null}
           <EditField label="Valor da parcela" value={installmentAmount} onChange={setInstallmentAmount} inputMode="decimal" />
           <div className="grid grid-cols-2 gap-3">
             <EditField label="Parcelas" value={installmentsCount} onChange={setInstallmentsCount} type="number" />
@@ -429,5 +500,6 @@ function EditField({
 function labelType(type: ListItem["type"]) {
   if (type === "entry") return "Entrada";
   if (type === "expense") return "Gasto";
+  if (type === "payable") return "Conta a pagar";
   return "Compra";
 }

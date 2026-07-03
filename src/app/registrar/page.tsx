@@ -5,11 +5,11 @@ import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import Link from "next/link";
-import { Banknote, CheckCircle2, CreditCard, Receipt, XCircle } from "lucide-react";
+import { Banknote, CheckCircle2, CreditCard, Receipt, ScrollText, XCircle } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
-import { createCardPurchase, createEntry, createExpense, fetchCards } from "@/features/finance/api";
+import { createCardPurchase, createEntry, createExpense, createPayable, fetchCards } from "@/features/finance/api";
 import { expenseCategories } from "@/lib/finance/categories";
 import { formatDateBr, monthLabel } from "@/lib/dates/format";
 import { getInvoiceDueDate, toIsoDate } from "@/lib/dates/invoice";
@@ -76,6 +76,16 @@ const expenseSchema = z.object({
   notes: optionalText,
 });
 
+const payableSchema = z.object({
+  description: z.string().min(1, "Informe a descricao"),
+  amount: money,
+  purchase_date: dateBr,
+  due_date: dateBr,
+  category: z.enum(["food", "housing", "transport", "subscriptions", "leisure", "health", "gifts", "personal", "education", "other"]),
+  status: z.enum(["pending", "paid"]),
+  notes: optionalText,
+});
+
 const purchaseSchema = z.object({
   description: z.string().min(1, "Informe a descricao"),
   card_id: z.string().min(1, "Escolha um cartao"),
@@ -84,6 +94,8 @@ const purchaseSchema = z.object({
   installment_amount: money,
   installments_count: z.coerce.number().int().min(1, "Minimo 1 parcela"),
   is_ongoing: z.boolean(),
+  is_recurring: z.boolean(),
+  recurring_status: z.enum(["active", "inactive"]),
   start_installment: z.coerce.number().int().min(1, "Minimo 1"),
   notes: optionalText,
 }).refine((data) => !data.is_ongoing || data.start_installment <= data.installments_count, {
@@ -91,11 +103,13 @@ const purchaseSchema = z.object({
   path: ["start_installment"],
 });
 
-type Mode = "entry" | "expense" | "purchase";
+type Mode = "entry" | "expense" | "payable" | "purchase";
 type EntryInput = z.input<typeof entrySchema>;
 type EntryForm = z.output<typeof entrySchema>;
 type ExpenseInput = z.input<typeof expenseSchema>;
 type ExpenseForm = z.output<typeof expenseSchema>;
+type PayableInput = z.input<typeof payableSchema>;
+type PayableForm = z.output<typeof payableSchema>;
 type PurchaseInput = z.input<typeof purchaseSchema>;
 type PurchaseForm = z.output<typeof purchaseSchema>;
 type Feedback = {
@@ -129,14 +143,16 @@ export default function RegistrarPage() {
     <AuthGuard>
       <AppShell title="Registrar" subtitle="Entradas, gastos e compras">
         {!hasSupabaseConfig() ? <ConfigNotice /> : null}
-        <div className="mb-5 grid grid-cols-3 gap-2">
+        <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
           <ModeButton active={mode === "entry"} label="Entrada" icon={<Banknote size={19} />} onClick={() => setMode("entry")} />
           <ModeButton active={mode === "expense"} label="Gasto" icon={<Receipt size={19} />} onClick={() => setMode("expense")} />
+          <ModeButton active={mode === "payable"} label="A pagar" icon={<ScrollText size={19} />} onClick={() => setMode("payable")} />
           <ModeButton active={mode === "purchase"} label="Cartao" icon={<CreditCard size={19} />} onClick={() => setMode("purchase")} />
         </div>
         {feedback ? <ActionFeedback feedback={feedback} onClose={() => setFeedback(null)} /> : null}
         {mode === "entry" ? <EntryFormView onFeedback={setFeedback} /> : null}
         {mode === "expense" ? <ExpenseFormView onFeedback={setFeedback} /> : null}
+        {mode === "payable" ? <PayableFormView onFeedback={setFeedback} /> : null}
         {mode === "purchase" ? <PurchaseFormView cards={cards} onFeedback={setFeedback} /> : null}
       </AppShell>
     </AuthGuard>
@@ -270,15 +286,68 @@ function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
   );
 }
 
+function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
+  const form = useForm<PayableInput, unknown, PayableForm>({
+    resolver: zodResolver(payableSchema),
+    defaultValues: { purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", description: "", amount: "", notes: "" },
+  });
+  const purchaseDateValue = useWatch({ control: form.control, name: "purchase_date" }) ?? "";
+  const dueDateValue = useWatch({ control: form.control, name: "due_date" }) ?? "";
+  async function submit(values: PayableForm) {
+    try {
+      await createPayable(createClient(), values);
+      form.reset({ purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", description: "", amount: "", notes: "" });
+      const monthValue = values.due_date.slice(0, 7);
+      onFeedback({
+        tone: "success",
+        title: "Conta a pagar registrada",
+        description: `Ela ja aparece em ${monthLabel(monthValue)} como ${values.status === "paid" ? "paga" : "pendente"}.`,
+        href: `/inicio?mes=${monthValue}`,
+        hrefLabel: "Ver no Inicio",
+      });
+    } catch (err) {
+      onFeedback({ tone: "error", title: "Nao foi possivel salvar a conta", description: err instanceof Error ? err.message : "Tente novamente." });
+    }
+  }
+  return (
+    <FormCard onSubmit={form.handleSubmit(submit)} submitLabel="Salvar conta a pagar">
+      <TextInput label="Descricao" error={form.formState.errors.description?.message} {...form.register("description")} />
+      <TextInput label="Valor" inputMode="decimal" placeholder="250,00" error={form.formState.errors.amount?.message} {...form.register("amount")} />
+      <DateInput
+        label="Data da compra"
+        error={form.formState.errors.purchase_date?.message}
+        value={purchaseDateValue}
+        onChange={(value) => form.setValue("purchase_date", value, { shouldDirty: true, shouldValidate: false })}
+        onBlur={() => form.trigger("purchase_date")}
+      />
+      <DateInput
+        label="Data de vencimento"
+        error={form.formState.errors.due_date?.message}
+        value={dueDateValue}
+        onChange={(value) => form.setValue("due_date", value, { shouldDirty: true, shouldValidate: false })}
+        onBlur={() => form.trigger("due_date")}
+      />
+      <CategorySelect {...form.register("category")} />
+      <Select label="Status" {...form.register("status")}>
+        <option value="pending">Pendente</option>
+        <option value="paid">Pago</option>
+      </Select>
+      <TextArea label="Observacao" {...form.register("notes")} />
+    </FormCard>
+  );
+}
+
 function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (value: Feedback) => void }) {
   const form = useForm<PurchaseInput, unknown, PurchaseForm>({
     resolver: zodResolver(purchaseSchema),
-    defaultValues: { purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" },
+    defaultValues: { purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, is_recurring: false, recurring_status: "inactive", start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" },
   });
   const purchaseDateValue = useWatch({ control: form.control, name: "purchase_date" }) ?? "";
   const watchedAmount = useWatch({ control: form.control, name: "installment_amount" });
   const watchedCount = useWatch({ control: form.control, name: "installments_count" });
+  const watchedCategory = useWatch({ control: form.control, name: "category" });
   const isOngoing = useWatch({ control: form.control, name: "is_ongoing" });
+  const isRecurring = useWatch({ control: form.control, name: "is_recurring" });
   const watchedStartInstallment = useWatch({ control: form.control, name: "start_installment" });
   const watchedCardId = useWatch({ control: form.control, name: "card_id" });
   const amount = toNumber(String(watchedAmount ?? ""));
@@ -302,6 +371,17 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
     };
   }, [isOngoing, purchaseDateValue, selectedCard, watchedStartInstallment]);
 
+  useEffect(() => {
+    if (isRecurring) {
+      form.setValue("installments_count", 12, { shouldDirty: true, shouldValidate: false });
+      form.setValue("recurring_status", "active", { shouldDirty: true, shouldValidate: false });
+    }
+    if (watchedCategory !== "subscriptions") {
+      form.setValue("is_recurring", false, { shouldDirty: true, shouldValidate: false });
+      form.setValue("recurring_status", "inactive", { shouldDirty: true, shouldValidate: false });
+    }
+  }, [form, isRecurring, watchedCategory]);
+
   async function submit(values: PurchaseForm) {
     const card = cards.find((item) => item.id === values.card_id);
     if (!card) {
@@ -315,8 +395,10 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
         purchase_date: values.purchase_date,
         category: values.category,
         installment_amount: values.installment_amount,
-        installments_count: values.installments_count,
+        installments_count: values.is_recurring && values.recurring_status === "active" ? 12 : values.installments_count,
         start_installment: values.is_ongoing ? values.start_installment : 1,
+        is_recurring: values.is_recurring,
+        recurring_status: values.is_recurring ? values.recurring_status : "inactive",
         notes: values.notes,
       };
       const result = await createCardPurchase(createClient(), { ...normalizedValues, card });
@@ -324,7 +406,7 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
       const lastInstallment = result.installments.at(-1);
       const monthValue = `${firstInstallment.invoice_year}-${String(firstInstallment.invoice_month).padStart(2, "0")}`;
       const createdCount = result.installments.length;
-      form.reset({ purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
+      form.reset({ purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, is_recurring: false, recurring_status: "inactive", start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
       onFeedback({
         tone: "success",
         title: "Compra no cartao registrada",
@@ -355,8 +437,29 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
         onBlur={() => form.trigger("purchase_date")}
       />
       <CategorySelect {...form.register("category")} />
+      {watchedCategory === "subscriptions" ? (
+        <>
+          <label className="flex min-h-12 items-center justify-between rounded-lg border border-gray-200 px-3">
+            <span className="text-sm font-medium text-gray-700">Assinatura recorrente</span>
+            <input type="checkbox" {...form.register("is_recurring")} className="size-5 accent-gray-950" />
+          </label>
+          {isRecurring ? (
+            <Select label="Status da assinatura" {...form.register("recurring_status")}>
+              <option value="active">Ativa</option>
+              <option value="inactive">Inativa</option>
+            </Select>
+          ) : null}
+        </>
+      ) : null}
       <TextInput label="Valor da parcela" inputMode="decimal" placeholder="120,00" error={form.formState.errors.installment_amount?.message} {...form.register("installment_amount")} />
-      <TextInput label="Quantidade de parcelas" type="number" min="1" error={form.formState.errors.installments_count?.message} {...form.register("installments_count")} />
+      <TextInput
+        label={isRecurring ? "Meses gerados" : "Quantidade de parcelas"}
+        type="number"
+        min="1"
+        disabled={isRecurring}
+        error={form.formState.errors.installments_count?.message}
+        {...form.register("installments_count")}
+      />
       <label className="flex min-h-12 items-center justify-between rounded-lg border border-gray-200 px-3">
         <span className="text-sm font-medium text-gray-700">Compra antiga em andamento</span>
         <input type="checkbox" {...form.register("is_ongoing")} className="size-5 accent-gray-950" />

@@ -13,7 +13,13 @@ import { expenseCategories, getCategoryLabel, getCategoryMeta } from "@/lib/fina
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import { fetchMonthData, updateInvoiceStatus, updateStatus, type MonthData } from "@/features/finance/api";
-import type { CardInstallment, Expense, PaymentStatus } from "@/types/finance";
+import type { CardInstallment, Expense, Payable, PaymentStatus } from "@/types/finance";
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error) return String(error.message);
+  return "Erro ao carregar dados.";
+}
 
 export default function InicioPage() {
   const [month, setMonth] = useState(() => {
@@ -33,7 +39,7 @@ export default function InicioPage() {
     try {
       setData(await fetchMonthData(createClient(), month));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao carregar dados.");
+      setError(getErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -47,14 +53,16 @@ export default function InicioPage() {
     const entries = data?.entries.reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
     const expensePaid = data?.expenses.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
     const expensePending = data?.expenses.filter((item) => item.status === "pending").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+    const payablePaid = data?.payables.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+    const payablePending = data?.payables.filter((item) => item.status === "pending").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
     const cardPaid = data?.invoices
       .filter((invoice) => invoice.status === "paid")
       .reduce((sum, invoice) => sum + invoiceTotal(invoice.card_installments), 0) ?? 0;
     const cardPending = data?.invoices
       .filter((invoice) => invoice.status === "pending")
       .reduce((sum, invoice) => sum + invoiceTotal(invoice.card_installments), 0) ?? 0;
-    const paid = expensePaid + cardPaid;
-    const pending = expensePending + cardPending;
+    const paid = expensePaid + payablePaid + cardPaid;
+    const pending = expensePending + payablePending + cardPending;
     return { entries, paid, pending, spent: paid + pending, balance: entries - paid - pending };
   }, [data]);
 
@@ -64,6 +72,10 @@ export default function InicioPage() {
 
     for (const expense of data?.expenses ?? []) {
       totals.set(expense.category, (totals.get(expense.category) ?? 0) + Number(expense.amount));
+    }
+
+    for (const payable of data?.payables ?? []) {
+      totals.set(payable.category, (totals.get(payable.category) ?? 0) + Number(payable.amount));
     }
 
     for (const invoice of data?.invoices ?? []) {
@@ -76,20 +88,35 @@ export default function InicioPage() {
       .map((category) => ({
         ...category,
         total: totals.get(category.value) ?? 0,
+        percent: summary.spent > 0 ? ((totals.get(category.value) ?? 0) / summary.spent) * 100 : 0,
       }))
       .filter((category) => category.total > 0)
       .sort((a, b) => b.total - a.total);
-  }, [data]);
+  }, [data, summary.spent]);
 
   const maxCategoryTotal = categoryTotals[0]?.total ?? 0;
 
-  async function toggle(table: "expenses" | "card_installments", id: string, status: PaymentStatus) {
-    await updateStatus(createClient(), table, id, status === "paid" ? "pending" : "paid");
+  function chooseCashAccount() {
+    const accounts = data?.cashAccounts.filter((account) => account.is_active) ?? [];
+    if (accounts.length === 0) return null;
+    const options = accounts.map((account, index) => `${index + 1}. ${account.name} (${formatCurrency(account.balance)})`).join("\n");
+    const choice = window.prompt(`Escolha a conta de caixa para baixar o pagamento, ou deixe vazio para nao mexer no caixa:\n${options}`);
+    if (!choice) return null;
+    const index = Number(choice) - 1;
+    return accounts[index]?.id ?? null;
+  }
+
+  async function toggle(table: "expenses" | "payables" | "card_installments", id: string, status: PaymentStatus) {
+    const nextStatus = status === "paid" ? "pending" : "paid";
+    const accountId = nextStatus === "paid" && table !== "card_installments" ? chooseCashAccount() : null;
+    await updateStatus(createClient(), table, id, nextStatus, accountId);
     await load();
   }
 
   async function toggleInvoice(id: string, status: PaymentStatus) {
-    await updateInvoiceStatus(createClient(), id, status === "paid" ? "pending" : "paid");
+    const nextStatus = status === "paid" ? "pending" : "paid";
+    const accountId = nextStatus === "paid" ? chooseCashAccount() : null;
+    await updateInvoiceStatus(createClient(), id, nextStatus, accountId);
     await load();
   }
 
@@ -136,7 +163,7 @@ export default function InicioPage() {
                 <div key={category.value}>
                   <div className="mb-1 flex items-center justify-between gap-3 text-sm">
                     <span className="font-medium text-gray-700">{category.label}</span>
-                    <span className="font-bold text-gray-950">{formatCurrency(category.total)}</span>
+                    <span className="font-bold text-gray-950">{formatCurrency(category.total)} • {category.percent.toFixed(0)}%</span>
                   </div>
                   <div className="h-2 overflow-hidden rounded-full bg-gray-100">
                     <div
@@ -156,7 +183,7 @@ export default function InicioPage() {
             <h2 className="text-lg font-bold">A pagar em {monthLabel(month)}</h2>
           </div>
 
-          {(data?.invoices.length ?? 0) === 0 && (data?.expenses.length ?? 0) === 0 && (data?.entries.length ?? 0) === 0 ? (
+          {(data?.invoices.length ?? 0) === 0 && (data?.expenses.length ?? 0) === 0 && (data?.payables.length ?? 0) === 0 && (data?.entries.length ?? 0) === 0 ? (
             <EmptyState title="Nenhum registro neste mes." actionLabel="Registrar agora" href="/registrar" />
           ) : null}
 
@@ -215,6 +242,7 @@ export default function InicioPage() {
           })}
 
           <GroupedExpenses expenses={data?.expenses ?? []} onToggle={(item) => toggle("expenses", item.id, item.status)} />
+          <GroupedPayables payables={data?.payables ?? []} onToggle={(item) => toggle("payables", item.id, item.status)} />
 
           <div className="rounded-lg border border-gray-200 bg-white">
             <div className="border-b border-gray-100 p-4">
@@ -311,6 +339,33 @@ function GroupedExpenses({ expenses, onToggle }: { expenses: Expense[]; onToggle
               date={expense.due_date}
               status={expense.status}
               onToggle={() => onToggle(expense)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GroupedPayables({ payables, onToggle }: { payables: Payable[]; onToggle: (payable: Payable) => void }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="border-b border-gray-100 p-4">
+        <h3 className="font-bold">Contas a pagar</h3>
+      </div>
+      {payables.length === 0 ? (
+        <div className="p-4 text-sm text-gray-500">Nenhuma conta a pagar neste mes.</div>
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {payables.map((payable) => (
+            <PaymentRow
+              key={payable.id}
+              title={payable.description}
+              subtitle={`${getCategoryLabel(payable.category)} - compra em ${formatDateBr(payable.purchase_date)}`}
+              amount={Number(payable.amount)}
+              date={payable.due_date}
+              status={payable.status}
+              onToggle={() => onToggle(payable)}
             />
           ))}
         </div>

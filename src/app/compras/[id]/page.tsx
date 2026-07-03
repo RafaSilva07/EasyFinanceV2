@@ -48,6 +48,8 @@ type PurchaseForm = {
   installmentAmount: string;
   installmentsCount: string;
   startInstallment: string;
+  isRecurring: boolean;
+  recurringStatus: "active" | "inactive";
   notes: string;
 };
 
@@ -102,6 +104,8 @@ export default function CompraDetalhePage() {
       installmentAmount: String(purchase.installment_amount).replace(".", ","),
       installmentsCount: String(purchase.installments_count),
       startInstallment: String(purchase.start_installment),
+      isRecurring: purchase.is_recurring,
+      recurringStatus: purchase.recurring_status,
       notes: purchase.notes ?? "",
     });
     setFeedback("");
@@ -151,6 +155,8 @@ export default function CompraDetalhePage() {
         installment_amount: installmentAmount,
         installments_count: installmentsCount,
         start_installment: startInstallment,
+        is_recurring: form.category === "subscriptions" && form.isRecurring,
+        recurring_status: form.category === "subscriptions" && form.isRecurring ? form.recurringStatus : "inactive",
         notes: form.notes.trim() || null,
       });
       setEditing(false);
@@ -221,6 +227,11 @@ export default function CompraDetalhePage() {
                   <p className="text-sm text-gray-500">
                     {purchase.cards?.name ?? "Cartao"} - {purchase.installments_count === 1 ? "A vista" : `${purchase.paid_installments}/${purchase.active_installments || purchase.installments_count} parcelas pagas`}
                   </p>
+                  {purchase.is_recurring ? (
+                    <span className={`mt-2 inline-flex rounded-full px-2 py-1 text-xs font-bold ${purchase.recurring_status === "active" ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-600"}`}>
+                      Assinatura {purchase.recurring_status === "active" ? "ativa" : "inativa"}
+                    </span>
+                  ) : null}
                 </div>
                 <div className="shrink-0 text-right">
                   <p className="text-xl font-bold text-gray-950">{formatCurrency(total)}</p>
@@ -275,6 +286,23 @@ export default function CompraDetalhePage() {
                       {expenseCategories.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </select>
                   </label>
+                  {form.category === "subscriptions" ? (
+                    <>
+                      <label className="flex min-h-11 items-center justify-between rounded-lg border border-gray-200 px-3">
+                        <span className="text-sm font-medium text-gray-700">Assinatura recorrente</span>
+                        <input type="checkbox" checked={form.isRecurring} onChange={(event) => setForm({ ...form, isRecurring: event.target.checked, recurringStatus: event.target.checked ? "active" : "inactive" })} className="size-5 accent-gray-950" />
+                      </label>
+                      {form.isRecurring ? (
+                        <label className="block">
+                          <span className="mb-1 block text-sm font-medium text-gray-700">Status da assinatura</span>
+                          <select value={form.recurringStatus} onChange={(event) => setForm({ ...form, recurringStatus: event.target.value as "active" | "inactive" })} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3">
+                            <option value="active">Ativa</option>
+                            <option value="inactive">Inativa</option>
+                          </select>
+                        </label>
+                      ) : null}
+                    </>
+                  ) : null}
                   <EditField label="Valor da parcela" value={form.installmentAmount} onChange={(value) => setForm({ ...form, installmentAmount: value })} inputMode="decimal" />
                   <div className="grid grid-cols-2 gap-3">
                     <EditField label="Parcelas" value={form.installmentsCount} onChange={(value) => setForm({ ...form, installmentsCount: value })} type="number" />
