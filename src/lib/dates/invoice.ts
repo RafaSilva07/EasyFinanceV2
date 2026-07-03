@@ -29,10 +29,11 @@ export function getInvoiceDueDate({
   installmentOffset = 0,
 }: InvoiceInput) {
   const purchase = toDate(purchaseDate);
-  const baseMonthOffset = purchase.getDate() <= closingDay ? 1 : 2;
+  const closingMonthOffset = purchase.getDate() <= closingDay ? 0 : 1;
+  const dueMonthAfterClosing = dueDay <= closingDay ? 1 : 0;
   const dueBase = new Date(
     purchase.getFullYear(),
-    purchase.getMonth() + baseMonthOffset + installmentOffset,
+    purchase.getMonth() + closingMonthOffset + dueMonthAfterClosing + installmentOffset,
     1,
   );
   const dueYear = dueBase.getFullYear();

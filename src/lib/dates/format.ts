@@ -18,6 +18,11 @@ export function currentMonthValue() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
+export function todayIso() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
 export function parseMonthValue(value: string) {
   const [year, month] = value.split("-").map(Number);
   return { year, month };
@@ -34,6 +39,10 @@ export function monthRange(monthValue: string) {
   const endDate = new Date(year, month, 0);
   const end = `${year}-${String(month).padStart(2, "0")}-${String(endDate.getDate()).padStart(2, "0")}`;
   return { start, end, year, month };
+}
+
+export function currentMonthRange() {
+  return monthRange(currentMonthValue());
 }
 
 export function formatDateBr(value: string) {

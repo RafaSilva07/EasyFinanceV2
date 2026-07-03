@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -12,26 +12,64 @@ import { ConfigNotice } from "@/components/layout/ConfigNotice";
 import { createCardPurchase, createEntry, createExpense, fetchCards } from "@/features/finance/api";
 import { expenseCategories } from "@/lib/finance/categories";
 import { formatDateBr, monthLabel } from "@/lib/dates/format";
+import { getInvoiceDueDate, toIsoDate } from "@/lib/dates/invoice";
 import { formatCurrency, toNumber } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import type { Card } from "@/types/finance";
 
 const today = () => new Date().toISOString().slice(0, 10);
+const todayBr = () => {
+  const [year, month, day] = today().split("-");
+  return `${day}/${month}/${year}`;
+};
+const maskDateBr = (value: string) => {
+  const digits = value.replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+};
+const dateBrToIso = (value: string) => {
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(value)) return null;
+  const [day, month, year] = value.split("/");
+  return `${year}-${month}-${day}`;
+};
 
 const money = z.string().min(1, "Informe o valor").transform(toNumber).pipe(z.number().positive("Informe um valor maior que zero"));
 const optionalText = z.string().optional().transform((value) => value?.trim() || null);
+const dateBr = z
+  .string()
+  .min(1, "Informe a data")
+  .regex(/^\d{2}\/\d{2}\/\d{4}$/, "Use o formato dd/mm/aaaa")
+  .transform((value, ctx) => {
+    const [day, month, year] = value.split("/").map(Number);
+    const date = new Date(year, month - 1, day);
+    const isValid =
+      date.getFullYear() === year &&
+      date.getMonth() === month - 1 &&
+      date.getDate() === day;
+
+    if (!isValid) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Informe uma data valida",
+      });
+      return z.NEVER;
+    }
+
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  });
 
 const entrySchema = z.object({
   description: z.string().min(1, "Informe a descricao"),
   amount: money,
-  date: z.string().min(1, "Informe a data"),
+  date: dateBr,
   notes: optionalText,
 });
 
 const expenseSchema = z.object({
   description: z.string().min(1, "Informe a descricao"),
   amount: money,
-  due_date: z.string().min(1, "Informe a data"),
+  due_date: dateBr,
   payment_method: z.enum(["pix", "cash", "debit", "boleto", "other"]),
   category: z.enum(["food", "housing", "transport", "subscriptions", "leisure", "health", "gifts", "personal", "education", "other"]),
   status: z.enum(["pending", "paid"]),
@@ -41,13 +79,14 @@ const expenseSchema = z.object({
 const purchaseSchema = z.object({
   description: z.string().min(1, "Informe a descricao"),
   card_id: z.string().min(1, "Escolha um cartao"),
-  purchase_date: z.string().min(1, "Informe a data"),
+  purchase_date: dateBr,
   category: z.enum(["food", "housing", "transport", "subscriptions", "leisure", "health", "gifts", "personal", "education", "other"]),
   installment_amount: money,
   installments_count: z.coerce.number().int().min(1, "Minimo 1 parcela"),
+  is_ongoing: z.boolean(),
   start_installment: z.coerce.number().int().min(1, "Minimo 1"),
   notes: optionalText,
-}).refine((data) => data.start_installment <= data.installments_count, {
+}).refine((data) => !data.is_ongoing || data.start_installment <= data.installments_count, {
   message: "A parcela inicial nao pode ser maior que o total",
   path: ["start_installment"],
 });
@@ -80,6 +119,11 @@ export default function RegistrarPage() {
   useEffect(() => {
     loadCards();
   }, []);
+
+  useEffect(() => {
+    if (!feedback) return;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [feedback]);
 
   return (
     <AuthGuard>
@@ -141,12 +185,13 @@ function ModeButton({ active, label, icon, onClick }: { active: boolean; label: 
 function EntryFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
   const form = useForm<EntryInput, unknown, EntryForm>({
     resolver: zodResolver(entrySchema),
-    defaultValues: { date: today(), description: "", amount: "", notes: "" },
+    defaultValues: { date: todayBr(), description: "", amount: "", notes: "" },
   });
+  const dateValue = useWatch({ control: form.control, name: "date" }) ?? "";
   async function submit(values: EntryForm) {
     try {
       await createEntry(createClient(), values);
-      form.reset({ date: today(), description: "", amount: "", notes: "" });
+      form.reset({ date: todayBr(), description: "", amount: "", notes: "" });
       const monthValue = values.date.slice(0, 7);
       onFeedback({
         tone: "success",
@@ -163,7 +208,13 @@ function EntryFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }
     <FormCard onSubmit={form.handleSubmit(submit)} submitLabel="Salvar entrada">
       <TextInput label="Descricao" error={form.formState.errors.description?.message} {...form.register("description")} />
       <TextInput label="Valor" inputMode="decimal" placeholder="3000,00" error={form.formState.errors.amount?.message} {...form.register("amount")} />
-      <TextInput label="Data" type="date" error={form.formState.errors.date?.message} {...form.register("date")} />
+      <DateInput
+        label="Data"
+        error={form.formState.errors.date?.message}
+        value={dateValue}
+        onChange={(value) => form.setValue("date", value, { shouldDirty: true, shouldValidate: false })}
+        onBlur={() => form.trigger("date")}
+      />
       <TextArea label="Observacao" {...form.register("notes")} />
     </FormCard>
   );
@@ -172,12 +223,13 @@ function EntryFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }
 function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
   const form = useForm<ExpenseInput, unknown, ExpenseForm>({
     resolver: zodResolver(expenseSchema),
-    defaultValues: { due_date: today(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" },
+    defaultValues: { due_date: todayBr(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" },
   });
+  const dueDateValue = useWatch({ control: form.control, name: "due_date" }) ?? "";
   async function submit(values: ExpenseForm) {
     try {
       await createExpense(createClient(), values);
-      form.reset({ due_date: today(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" });
+      form.reset({ due_date: todayBr(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" });
       const monthValue = values.due_date.slice(0, 7);
       onFeedback({
         tone: "success",
@@ -194,7 +246,13 @@ function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
     <FormCard onSubmit={form.handleSubmit(submit)} submitLabel="Salvar gasto">
       <TextInput label="Descricao" error={form.formState.errors.description?.message} {...form.register("description")} />
       <TextInput label="Valor" inputMode="decimal" placeholder="99,90" error={form.formState.errors.amount?.message} {...form.register("amount")} />
-      <TextInput label="Data de vencimento ou pagamento" type="date" error={form.formState.errors.due_date?.message} {...form.register("due_date")} />
+      <DateInput
+        label="Data de vencimento ou pagamento"
+        error={form.formState.errors.due_date?.message}
+        value={dueDateValue}
+        onChange={(value) => form.setValue("due_date", value, { shouldDirty: true, shouldValidate: false })}
+        onBlur={() => form.trigger("due_date")}
+      />
       <Select label="Forma de pagamento" {...form.register("payment_method")}>
         <option value="pix">Pix</option>
         <option value="cash">Dinheiro</option>
@@ -215,13 +273,34 @@ function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
 function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (value: Feedback) => void }) {
   const form = useForm<PurchaseInput, unknown, PurchaseForm>({
     resolver: zodResolver(purchaseSchema),
-    defaultValues: { purchase_date: today(), category: "other", installments_count: 1, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" },
+    defaultValues: { purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" },
   });
+  const purchaseDateValue = useWatch({ control: form.control, name: "purchase_date" }) ?? "";
   const watchedAmount = useWatch({ control: form.control, name: "installment_amount" });
   const watchedCount = useWatch({ control: form.control, name: "installments_count" });
+  const isOngoing = useWatch({ control: form.control, name: "is_ongoing" });
+  const watchedStartInstallment = useWatch({ control: form.control, name: "start_installment" });
+  const watchedCardId = useWatch({ control: form.control, name: "card_id" });
   const amount = toNumber(String(watchedAmount ?? ""));
   const count = Number(watchedCount ?? 1);
   const total = useMemo(() => amount * (Number.isFinite(count) ? count : 1), [amount, count]);
+  const selectedCard = cards.find((card) => card.id === watchedCardId);
+  const invoicePreview = useMemo(() => {
+    const isoDate = dateBrToIso(purchaseDateValue);
+    const startInstallment = isOngoing ? Number(watchedStartInstallment ?? 1) : 1;
+    if (!selectedCard || !isoDate || !Number.isFinite(startInstallment) || startInstallment < 1) return null;
+    const dueDate = getInvoiceDueDate({
+      purchaseDate: isoDate,
+      closingDay: selectedCard.closing_day,
+      dueDay: selectedCard.due_day,
+      installmentOffset: startInstallment - 1,
+    });
+    const monthValue = `${dueDate.getFullYear()}-${String(dueDate.getMonth() + 1).padStart(2, "0")}`;
+    return {
+      dueDate: toIsoDate(dueDate),
+      monthValue,
+    };
+  }, [isOngoing, purchaseDateValue, selectedCard, watchedStartInstallment]);
 
   async function submit(values: PurchaseForm) {
     const card = cards.find((item) => item.id === values.card_id);
@@ -230,12 +309,22 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
       return;
     }
     try {
-      const result = await createCardPurchase(createClient(), { ...values, card });
+      const normalizedValues = {
+        description: values.description,
+        card_id: values.card_id,
+        purchase_date: values.purchase_date,
+        category: values.category,
+        installment_amount: values.installment_amount,
+        installments_count: values.installments_count,
+        start_installment: values.is_ongoing ? values.start_installment : 1,
+        notes: values.notes,
+      };
+      const result = await createCardPurchase(createClient(), { ...normalizedValues, card });
       const firstInstallment = result.installments[0];
       const lastInstallment = result.installments.at(-1);
       const monthValue = `${firstInstallment.invoice_year}-${String(firstInstallment.invoice_month).padStart(2, "0")}`;
       const createdCount = result.installments.length;
-      form.reset({ purchase_date: today(), category: "other", installments_count: 1, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
+      form.reset({ purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
       onFeedback({
         tone: "success",
         title: "Compra no cartao registrada",
@@ -258,15 +347,41 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
         <option value="">Escolha</option>
         {cards.map((card) => <option key={card.id} value={card.id}>{card.name}</option>)}
       </Select>
-      <TextInput label="Data original da compra" type="date" error={form.formState.errors.purchase_date?.message} {...form.register("purchase_date")} />
+      <DateInput
+        label="Data original da compra"
+        error={form.formState.errors.purchase_date?.message}
+        value={purchaseDateValue}
+        onChange={(value) => form.setValue("purchase_date", value, { shouldDirty: true, shouldValidate: false })}
+        onBlur={() => form.trigger("purchase_date")}
+      />
       <CategorySelect {...form.register("category")} />
       <TextInput label="Valor da parcela" inputMode="decimal" placeholder="120,00" error={form.formState.errors.installment_amount?.message} {...form.register("installment_amount")} />
       <TextInput label="Quantidade de parcelas" type="number" min="1" error={form.formState.errors.installments_count?.message} {...form.register("installments_count")} />
-      <TextInput label="Parcela inicial no sistema" type="number" min="1" error={form.formState.errors.start_installment?.message} {...form.register("start_installment")} />
+      <label className="flex min-h-12 items-center justify-between rounded-lg border border-gray-200 px-3">
+        <span className="text-sm font-medium text-gray-700">Compra antiga em andamento</span>
+        <input type="checkbox" {...form.register("is_ongoing")} className="size-5 accent-gray-950" />
+      </label>
+      {isOngoing ? (
+        <TextInput label="Parcela inicial no sistema" type="number" min="1" error={form.formState.errors.start_installment?.message} {...form.register("start_installment")} />
+      ) : null}
       <div className="rounded-lg bg-gray-100 p-4">
         <p className="text-sm text-gray-500">Total calculado</p>
         <p className="text-xl font-bold">{formatCurrency(total)}</p>
       </div>
+      {invoicePreview ? (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+          <p className="font-bold">Previa da fatura</p>
+          <p className="mt-1">
+            A primeira parcela criada aparece em <strong>{monthLabel(invoicePreview.monthValue)}</strong> e vence em{" "}
+            <strong>{formatDateBr(invoicePreview.dueDate)}</strong>.
+          </p>
+          {selectedCard ? (
+            <p className="mt-2 text-xs">
+              Cartao: fecha dia {selectedCard.closing_day}, vence dia {selectedCard.due_day}. Parcela inicial usada: {isOngoing ? Number(watchedStartInstallment ?? 1) : 1}.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <TextArea label="Observacao" {...form.register("notes")} />
     </FormCard>
   );
@@ -288,6 +403,57 @@ function TextInput({ label, error, ...props }: FieldProps) {
     <label className="block">
       <span className="mb-1 block text-sm font-medium text-gray-700">{label}</span>
       <input {...props} className="h-12 w-full rounded-lg border border-gray-300 px-3 outline-none focus:border-gray-900" />
+      {error ? <span className="mt-1 block text-xs text-red-600">{error}</span> : null}
+    </label>
+  );
+}
+
+function DateInput({
+  label,
+  error,
+  value,
+  onChange,
+  onBlur,
+}: {
+  label: string;
+  error?: string;
+  value: string;
+  onChange: (value: string) => void;
+  onBlur: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const replaceOnNextInputRef = useRef(false);
+
+  return (
+    <label className="block">
+      <span className="mb-1 block text-sm font-medium text-gray-700">{label}</span>
+      <input
+        ref={inputRef}
+        value={value}
+        onFocus={() => {
+          replaceOnNextInputRef.current = true;
+          requestAnimationFrame(() => inputRef.current?.select());
+        }}
+        onChange={(event) => {
+          const currentDigits = value.replace(/\D/g, "");
+          const typedDigits = event.target.value.replace(/\D/g, "");
+          const nextDigits =
+            replaceOnNextInputRef.current && typedDigits.includes(currentDigits)
+              ? typedDigits.replace(currentDigits, "")
+              : typedDigits;
+
+          replaceOnNextInputRef.current = false;
+          onChange(maskDateBr(nextDigits));
+        }}
+        onBlur={() => {
+          replaceOnNextInputRef.current = false;
+          onBlur();
+        }}
+        inputMode="numeric"
+        placeholder="dd/mm/aaaa"
+        maxLength={10}
+        className="h-12 w-full rounded-lg border border-gray-300 px-3 outline-none focus:border-gray-900"
+      />
       {error ? <span className="mt-1 block text-xs text-red-600">{error}</span> : null}
     </label>
   );

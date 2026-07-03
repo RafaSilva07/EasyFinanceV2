@@ -54,16 +54,31 @@ create table if not exists public.card_purchases (
   installment_amount numeric(12,2) not null,
   installments_count integer not null default 1 check (installments_count >= 1),
   start_installment integer not null default 1 check (start_installment >= 1),
+  status text not null default 'active' check (status in ('active', 'canceled')),
   notes text,
   created_at timestamp with time zone default now(),
   updated_at timestamp with time zone default now(),
   constraint card_purchases_start_check check (start_installment <= installments_count)
 );
 
+create table if not exists public.card_invoices (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  card_id uuid not null references public.cards(id) on delete cascade,
+  invoice_month integer not null check (invoice_month between 1 and 12),
+  invoice_year integer not null,
+  due_date date not null,
+  status text not null default 'pending' check (status in ('pending', 'paid')),
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now(),
+  constraint card_invoices_unique_month unique (user_id, card_id, invoice_month, invoice_year)
+);
+
 create table if not exists public.card_installments (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   card_purchase_id uuid not null references public.card_purchases(id) on delete cascade,
+  invoice_id uuid references public.card_invoices(id) on delete set null,
   card_id uuid not null references public.cards(id) on delete cascade,
   description text not null,
   installment_number integer not null,
@@ -84,12 +99,16 @@ create index if not exists expenses_user_due_idx on public.expenses(user_id, due
 create index if not exists expenses_user_category_idx on public.expenses(user_id, category);
 create index if not exists installments_user_invoice_idx on public.card_installments(user_id, invoice_year, invoice_month);
 create index if not exists installments_user_category_idx on public.card_installments(user_id, category);
+create index if not exists card_invoices_user_month_idx on public.card_invoices(user_id, invoice_year, invoice_month);
+create index if not exists card_invoices_card_idx on public.card_invoices(card_id);
+create index if not exists card_installments_invoice_idx on public.card_installments(invoice_id);
 
 alter table public.profiles enable row level security;
 alter table public.cards enable row level security;
 alter table public.entries enable row level security;
 alter table public.expenses enable row level security;
 alter table public.card_purchases enable row level security;
+alter table public.card_invoices enable row level security;
 alter table public.card_installments enable row level security;
 
 create or replace function public.handle_new_user()
@@ -188,6 +207,22 @@ create policy "card_purchases_update_own" on public.card_purchases
 
 drop policy if exists "card_purchases_delete_own" on public.card_purchases;
 create policy "card_purchases_delete_own" on public.card_purchases
+  for delete using (user_id = auth.uid());
+
+drop policy if exists "card_invoices_select_own" on public.card_invoices;
+create policy "card_invoices_select_own" on public.card_invoices
+  for select using (user_id = auth.uid());
+
+drop policy if exists "card_invoices_insert_own" on public.card_invoices;
+create policy "card_invoices_insert_own" on public.card_invoices
+  for insert with check (user_id = auth.uid());
+
+drop policy if exists "card_invoices_update_own" on public.card_invoices;
+create policy "card_invoices_update_own" on public.card_invoices
+  for update using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+drop policy if exists "card_invoices_delete_own" on public.card_invoices;
+create policy "card_invoices_delete_own" on public.card_invoices
   for delete using (user_id = auth.uid());
 
 drop policy if exists "card_installments_select_own" on public.card_installments;

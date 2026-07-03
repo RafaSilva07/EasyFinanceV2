@@ -1,18 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Circle, WalletCards } from "lucide-react";
+import { CheckCircle2, ChevronDown, Circle, WalletCards } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { currentMonthValue, formatDateBr, monthLabel } from "@/lib/dates/format";
-import { expenseCategories, getCategoryLabel } from "@/lib/finance/categories";
+import { expenseCategories, getCategoryLabel, getCategoryMeta } from "@/lib/finance/categories";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import { fetchMonthData, updateStatus, type MonthData } from "@/features/finance/api";
-import type { Expense, PaymentStatus } from "@/types/finance";
+import { fetchMonthData, updateInvoiceStatus, updateStatus, type MonthData } from "@/features/finance/api";
+import type { CardInstallment, Expense, PaymentStatus } from "@/types/finance";
 
 export default function InicioPage() {
   const [month, setMonth] = useState(() => {
@@ -23,6 +23,7 @@ export default function InicioPage() {
   const [data, setData] = useState<MonthData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [expandedInvoices, setExpandedInvoices] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     if (!hasSupabaseConfig()) return;
@@ -45,23 +46,15 @@ export default function InicioPage() {
     const entries = data?.entries.reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
     const expensePaid = data?.expenses.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
     const expensePending = data?.expenses.filter((item) => item.status === "pending").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
-    const cardPaid = data?.installments.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
-    const cardPending = data?.installments.filter((item) => item.status === "pending").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+    const cardPaid = data?.invoices
+      .filter((invoice) => invoice.status === "paid")
+      .reduce((sum, invoice) => sum + invoiceTotal(invoice.card_installments), 0) ?? 0;
+    const cardPending = data?.invoices
+      .filter((invoice) => invoice.status === "pending")
+      .reduce((sum, invoice) => sum + invoiceTotal(invoice.card_installments), 0) ?? 0;
     const paid = expensePaid + cardPaid;
     const pending = expensePending + cardPending;
     return { entries, paid, pending, spent: paid + pending, balance: entries - paid - pending };
-  }, [data]);
-
-  const installmentsByCard = useMemo(() => {
-    const groups = new Map<string, NonNullable<MonthData["installments"]>>();
-    for (const item of data?.installments ?? []) {
-      const key = item.card_id;
-      groups.set(key, [...(groups.get(key) ?? []), item]);
-    }
-    return Array.from(groups.entries()).map(([cardId, items]) => ({
-      card: items[0]?.cards ?? data?.cards.find((card) => card.id === cardId) ?? null,
-      items,
-    }));
   }, [data]);
 
   const categoryTotals = useMemo(() => {
@@ -72,8 +65,10 @@ export default function InicioPage() {
       totals.set(expense.category, (totals.get(expense.category) ?? 0) + Number(expense.amount));
     }
 
-    for (const installment of data?.installments ?? []) {
-      totals.set(installment.category, (totals.get(installment.category) ?? 0) + Number(installment.amount));
+    for (const invoice of data?.invoices ?? []) {
+      for (const installment of invoice.card_installments) {
+        totals.set(installment.category, (totals.get(installment.category) ?? 0) + Number(installment.amount));
+      }
     }
 
     return expenseCategories
@@ -90,6 +85,15 @@ export default function InicioPage() {
   async function toggle(table: "expenses" | "card_installments", id: string, status: PaymentStatus) {
     await updateStatus(createClient(), table, id, status === "paid" ? "pending" : "paid");
     await load();
+  }
+
+  async function toggleInvoice(id: string, status: PaymentStatus) {
+    await updateInvoiceStatus(createClient(), id, status === "paid" ? "pending" : "paid");
+    await load();
+  }
+
+  function toggleInvoiceDetails(id: string) {
+    setExpandedInvoices((current) => ({ ...current, [id]: !current[id] }));
   }
 
   return (
@@ -135,7 +139,7 @@ export default function InicioPage() {
                   </div>
                   <div className="h-2 overflow-hidden rounded-full bg-gray-100">
                     <div
-                      className="h-full rounded-full bg-gray-900"
+                      className={`h-full rounded-full ${category.barClass}`}
                       style={{ width: `${maxCategoryTotal ? Math.max((category.total / maxCategoryTotal) * 100, 6) : 0}%` }}
                     />
                   </div>
@@ -151,31 +155,62 @@ export default function InicioPage() {
             <h2 className="text-lg font-bold">A pagar em {monthLabel(month)}</h2>
           </div>
 
-          {installmentsByCard.length === 0 && (data?.expenses.length ?? 0) === 0 && (data?.entries.length ?? 0) === 0 ? (
+          {(data?.invoices.length ?? 0) === 0 && (data?.expenses.length ?? 0) === 0 && (data?.entries.length ?? 0) === 0 ? (
             <EmptyState title="Nenhum registro neste mes." actionLabel="Registrar agora" href="/registrar" />
           ) : null}
 
-          {installmentsByCard.map((group) => (
-            <div key={group.card?.id ?? "card"} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
-              <div className="flex items-center gap-2 border-b border-gray-100 p-4">
-                <span className="size-3 rounded-full" style={{ background: group.card?.color ?? "#111827" }} />
-                <h3 className="font-bold">{group.card?.name ?? "Cartao"}</h3>
+          {data?.invoices.map((invoice) => {
+            const expanded = Boolean(expandedInvoices[invoice.id]);
+            const total = invoiceTotal(invoice.card_installments);
+            return (
+              <div key={invoice.id} className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => toggleInvoiceDetails(invoice.id)}
+                  className="flex w-full items-center justify-between gap-3 p-4 text-left"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="size-3 rounded-full" style={{ background: invoice.cards?.color ?? "#111827" }} />
+                      <h3 className="truncate font-bold">{invoice.cards?.name ?? "Cartao"}</h3>
+                      <ChevronDown className={`shrink-0 text-gray-500 transition-transform ${expanded ? "rotate-180" : ""}`} size={18} />
+                    </div>
+                    <p className="mt-1 text-sm text-gray-500">
+                      Vence em {formatDateBr(invoice.due_date)} - {invoice.card_installments.length} compra{invoice.card_installments.length === 1 ? "" : "s"}
+                    </p>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <p className="font-bold text-gray-950">{formatCurrency(total)}</p>
+                    <span className={`mt-1 inline-flex rounded-full px-2 py-1 text-xs font-bold ${invoice.status === "paid" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                      {invoice.status === "paid" ? "Paga" : "Aberta"}
+                    </span>
+                  </div>
+                </button>
+                <div className="border-t border-gray-100 px-4 pb-4">
+                  <button
+                    type="button"
+                    onClick={() => toggleInvoice(invoice.id, invoice.status)}
+                    className={`mt-3 h-11 w-full rounded-lg text-sm font-bold ${invoice.status === "paid" ? "bg-emerald-100 text-emerald-700" : "bg-gray-950 text-white"}`}
+                  >
+                    {invoice.status === "paid" ? "Reabrir fatura" : "Pagar fatura"}
+                  </button>
+                </div>
+                {expanded ? (
+                  <div className="divide-y divide-gray-100 border-t border-gray-100">
+                    {invoice.card_installments.map((item) => (
+                      <InvoiceInstallmentRow
+                        key={item.id}
+                        title={`${item.description} ${item.installment_number}/${item.installments_count}`}
+                        category={item.category}
+                        amount={Number(item.amount)}
+                        date={item.due_date}
+                      />
+                    ))}
+                  </div>
+                ) : null}
               </div>
-              <div className="divide-y divide-gray-100">
-                {group.items.map((item) => (
-                  <PaymentRow
-                    key={item.id}
-                    title={`${item.description} ${item.installment_number}/${item.installments_count}`}
-                    subtitle={getCategoryLabel(item.category)}
-                    amount={Number(item.amount)}
-                    date={item.due_date}
-                    status={item.status}
-                    onToggle={() => toggle("card_installments", item.id, item.status)}
-                  />
-                ))}
-              </div>
-            </div>
-          ))}
+            );
+          })}
 
           <GroupedExpenses expenses={data?.expenses ?? []} onToggle={(item) => toggle("expenses", item.id, item.status)} />
 
@@ -205,6 +240,10 @@ export default function InicioPage() {
   );
 }
 
+function invoiceTotal(installments: CardInstallment[]) {
+  return installments.reduce((sum, item) => sum + Number(item.amount), 0);
+}
+
 function SummaryCard({ label, value, tone, wide }: { label: string; value: number; tone: "green" | "red" | "amber"; wide?: boolean }) {
   const toneClass = tone === "green" ? "text-emerald-600" : tone === "red" ? "text-red-600" : "text-amber-600";
   return (
@@ -230,6 +269,22 @@ function PaymentRow({ title, subtitle, amount, date, status, onToggle }: { title
         <p className="font-bold">{formatCurrency(amount)}</p>
         <StatusBadge status={status} />
       </div>
+    </div>
+  );
+}
+
+function InvoiceInstallmentRow({ title, category, amount, date }: { title: string; category: CardInstallment["category"]; amount: number; date: string }) {
+  const categoryMeta = getCategoryMeta(category);
+  return (
+    <div className="flex items-center gap-3 p-4">
+      <div className={`grid size-7 shrink-0 place-items-center rounded-full text-xs font-bold ${categoryMeta.badgeClass}`}>
+        {categoryMeta.initial}
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-semibold">{title}</p>
+        <p className="text-sm text-gray-500">{categoryMeta.label} - {formatDateBr(date)}</p>
+      </div>
+      <p className="font-bold">{formatCurrency(amount)}</p>
     </div>
   );
 }

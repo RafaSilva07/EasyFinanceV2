@@ -1,4 +1,5 @@
 export type PaymentStatus = "pending" | "paid";
+export type PurchaseStatus = "active" | "canceled";
 export type PaymentMethod = "pix" | "cash" | "debit" | "boleto" | "other";
 export type ExpenseCategory =
   | "food"
@@ -60,7 +61,20 @@ export type CardPurchase = {
   installment_amount: number;
   installments_count: number;
   start_installment: number;
+  status: PurchaseStatus;
   notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CardInvoice = {
+  id: string;
+  user_id: string;
+  card_id: string;
+  invoice_month: number;
+  invoice_year: number;
+  due_date: string;
+  status: PaymentStatus;
   created_at: string;
   updated_at: string;
 };
@@ -69,6 +83,7 @@ export type CardInstallment = {
   id: string;
   user_id: string;
   card_purchase_id: string;
+  invoice_id: string | null;
   card_id: string;
   description: string;
   installment_number: number;
@@ -84,3 +99,13 @@ export type CardInstallment = {
 };
 
 export type InstallmentWithCard = CardInstallment & { cards?: Card | null };
+export type CardInvoiceWithCard = CardInvoice & { cards?: Card | null };
+export type CardPurchaseWithCard = CardPurchase & { cards?: Card | null };
+export type CardPurchaseWithProgress = CardPurchaseWithCard & {
+  paid_installments: number;
+  active_installments: number;
+  installments_in_range?: CardInstallment[];
+  open_installments_in_range?: CardInstallment[];
+  next_due_date: string | null;
+  has_paid_invoice: boolean;
+};
