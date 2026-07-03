@@ -15,6 +15,11 @@ import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import { fetchMonthData, updateInvoiceStatus, updateStatus, type MonthData } from "@/features/finance/api";
 import type { CardInstallment, Expense, Payable, PaymentStatus } from "@/types/finance";
 
+type CategoryTotal = (typeof expenseCategories)[number] & {
+  total: number;
+  percent: number;
+};
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   if (error && typeof error === "object" && "message" in error) return String(error.message);
@@ -30,6 +35,7 @@ export default function InicioPage() {
   const [data, setData] = useState<MonthData | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showCategoryDetails, setShowCategoryDetails] = useState(false);
   const [expandedInvoices, setExpandedInvoices] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
@@ -94,8 +100,6 @@ export default function InicioPage() {
       .sort((a, b) => b.total - a.total);
   }, [data, summary.spent]);
 
-  const maxCategoryTotal = categoryTotals[0]?.total ?? 0;
-
   function chooseCashAccount() {
     const accounts = data?.cashAccounts.filter((account) => account.is_active) ?? [];
     if (accounts.length === 0) return null;
@@ -147,35 +151,12 @@ export default function InicioPage() {
           <SummaryCard label="Saldo previsto" value={summary.balance} tone={summary.balance >= 0 ? "green" : "red"} wide />
         </section>
 
-        <section className="mb-6 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <div>
-              <h2 className="font-bold">Gastos por categoria</h2>
-              <p className="text-sm text-gray-500">Resumo do mes selecionado</p>
-            </div>
-            <p className="text-sm font-bold text-gray-900">{formatCurrency(summary.spent)}</p>
-          </div>
-          {categoryTotals.length === 0 ? (
-            <p className="text-sm text-gray-500">Nenhum gasto registrado neste mes.</p>
-          ) : (
-            <div className="space-y-3">
-              {categoryTotals.map((category) => (
-                <div key={category.value}>
-                  <div className="mb-1 flex items-center justify-between gap-3 text-sm">
-                    <span className="font-medium text-gray-700">{category.label}</span>
-                    <span className="font-bold text-gray-950">{formatCurrency(category.total)} • {category.percent.toFixed(0)}%</span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-gray-100">
-                    <div
-                      className={`h-full rounded-full ${category.barClass}`}
-                      style={{ width: `${maxCategoryTotal ? Math.max((category.total / maxCategoryTotal) * 100, 6) : 0}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
+        <CategorySummary
+          categories={categoryTotals}
+          total={summary.spent}
+          expanded={showCategoryDetails}
+          onToggle={() => setShowCategoryDetails((current) => !current)}
+        />
 
         <section className="space-y-5">
           <div className="flex items-center gap-2">
@@ -282,6 +263,100 @@ function SummaryCard({ label, value, tone, wide }: { label: string; value: numbe
       <p className={`mt-1 text-xl font-bold ${toneClass}`}>{formatCurrency(value)}</p>
     </div>
   );
+}
+
+function CategorySummary({
+  categories,
+  total,
+  expanded,
+  onToggle,
+}: {
+  categories: CategoryTotal[];
+  total: number;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const maxCategoryTotal = categories[0]?.total ?? 0;
+  const topCategories = categories.slice(0, 4);
+  const pieGradient = buildPieGradient(categories);
+
+  return (
+    <section className="mb-6 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+      <button type="button" onClick={onToggle} className="w-full p-4 text-left">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="font-bold">Gastos por categoria</h2>
+            <p className="text-sm text-gray-500">{expanded ? "Detalhes do mes selecionado" : "Toque para ver detalhes"}</p>
+          </div>
+          <div className="text-right">
+            <p className="text-sm font-bold text-gray-900">{formatCurrency(total)}</p>
+            <ChevronDown className={`ml-auto mt-1 text-gray-500 transition-transform ${expanded ? "rotate-180" : ""}`} size={18} />
+          </div>
+        </div>
+
+        {categories.length === 0 ? (
+          <p className="text-sm text-gray-500">Nenhum gasto registrado neste mes.</p>
+        ) : (
+          <div className="flex items-center gap-4">
+            <div
+              className="grid size-28 shrink-0 place-items-center rounded-full"
+              style={{ background: pieGradient }}
+              aria-label="Grafico de categorias"
+            >
+              <div className="grid size-16 place-items-center rounded-full bg-white text-center shadow-sm">
+                <span className="text-sm font-bold text-gray-950">{categories[0]?.percent.toFixed(0)}%</span>
+              </div>
+            </div>
+            <div className="min-w-0 flex-1 space-y-2">
+              {topCategories.map((category) => (
+                <div key={category.value} className="flex items-center justify-between gap-2 text-sm">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="size-2.5 shrink-0 rounded-full" style={{ background: category.color }} />
+                    <span className="truncate font-medium text-gray-700">{category.label}</span>
+                  </span>
+                  <span className="shrink-0 font-bold text-gray-950">{category.percent.toFixed(0)}%</span>
+                </div>
+              ))}
+              {categories.length > topCategories.length ? (
+                <p className="text-xs font-medium text-gray-500">+{categories.length - topCategories.length} categoria{categories.length - topCategories.length === 1 ? "" : "s"}</p>
+              ) : null}
+            </div>
+          </div>
+        )}
+      </button>
+
+      {expanded && categories.length > 0 ? (
+        <div className="space-y-3 border-t border-gray-100 p-4">
+          {categories.map((category) => (
+            <div key={category.value}>
+              <div className="mb-1 flex items-center justify-between gap-3 text-sm">
+                <span className="font-medium text-gray-700">{category.label}</span>
+                <span className="font-bold text-gray-950">{formatCurrency(category.total)} • {category.percent.toFixed(0)}%</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                <div
+                  className={`h-full rounded-full ${category.barClass}`}
+                  style={{ width: `${maxCategoryTotal ? Math.max((category.total / maxCategoryTotal) * 100, 6) : 0}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function buildPieGradient(categories: CategoryTotal[]) {
+  if (categories.length === 0) return "#F3F4F6";
+  let cursor = 0;
+  const segments = categories.map((category) => {
+    const start = cursor;
+    const end = cursor + category.percent;
+    cursor = end;
+    return `${category.color} ${start}% ${end}%`;
+  });
+  return `conic-gradient(${segments.join(", ")})`;
 }
 
 function PaymentRow({ title, subtitle, amount, date, status, onToggle }: { title: string; subtitle?: string; amount: number; date: string; status: PaymentStatus; onToggle: () => void }) {
