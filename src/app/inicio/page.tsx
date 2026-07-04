@@ -12,13 +12,15 @@ import { currentMonthValue, formatDateBr, monthLabel } from "@/lib/dates/format"
 import { expenseCategories, getCategoryLabel, getCategoryMeta } from "@/lib/finance/categories";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import { fetchMonthData, updateInvoiceStatus, updateStatus, type MonthData } from "@/features/finance/api";
+import { fetchMonthData, fetchOpenData, updateInvoiceStatus, updateStatus, type MonthData, type OpenCardGroup, type OpenData } from "@/features/finance/api";
 import type { CardInstallment, Expense, Payable, PaymentStatus } from "@/types/finance";
 
 type CategoryTotal = (typeof expenseCategories)[number] & {
   total: number;
   percent: number;
 };
+
+type ViewMode = "month" | "open";
 
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
@@ -33,6 +35,8 @@ export default function InicioPage() {
     return params.get("mes") ?? currentMonthValue();
   });
   const [data, setData] = useState<MonthData | null>(null);
+  const [openData, setOpenData] = useState<OpenData | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("month");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showCategoryDetails, setShowCategoryDetails] = useState(false);
@@ -43,19 +47,31 @@ export default function InicioPage() {
     setLoading(true);
     setError("");
     try {
-      setData(await fetchMonthData(createClient(), month));
+      if (viewMode === "open") {
+        setOpenData(await fetchOpenData(createClient()));
+      } else {
+        setData(await fetchMonthData(createClient(), month));
+      }
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
       setLoading(false);
     }
-  }, [month]);
+  }, [month, viewMode]);
 
   useEffect(() => {
     load();
   }, [load]);
 
   const summary = useMemo(() => {
+    if (viewMode === "open") {
+      const expensePending = openData?.expenses.reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+      const payablePending = openData?.payables.reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
+      const cardPending = openData?.openCardGroups.reduce((sum, group) => sum + group.total, 0) ?? 0;
+      const pending = expensePending + payablePending + cardPending;
+      return { entries: 0, paid: 0, pending, spent: pending, balance: -pending };
+    }
+
     const entries = data?.entries.reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
     const expensePaid = data?.expenses.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
     const expensePending = data?.expenses.filter((item) => item.status === "pending").reduce((sum, item) => sum + Number(item.amount), 0) ?? 0;
@@ -70,23 +86,36 @@ export default function InicioPage() {
     const paid = expensePaid + payablePaid + cardPaid;
     const pending = expensePending + payablePending + cardPending;
     return { entries, paid, pending, spent: paid + pending, balance: entries - paid - pending };
-  }, [data]);
+  }, [data, openData, viewMode]);
 
   const categoryTotals = useMemo(() => {
     const totals = new Map<string, number>();
     for (const category of expenseCategories) totals.set(category.value, 0);
 
-    for (const expense of data?.expenses ?? []) {
+    const expenses = viewMode === "open" ? openData?.expenses ?? [] : data?.expenses ?? [];
+    const payables = viewMode === "open" ? openData?.payables ?? [] : data?.payables ?? [];
+
+    for (const expense of expenses) {
       totals.set(expense.category, (totals.get(expense.category) ?? 0) + Number(expense.amount));
     }
 
-    for (const payable of data?.payables ?? []) {
+    for (const payable of payables) {
       totals.set(payable.category, (totals.get(payable.category) ?? 0) + Number(payable.amount));
     }
 
-    for (const invoice of data?.invoices ?? []) {
-      for (const installment of invoice.card_installments) {
-        totals.set(installment.category, (totals.get(installment.category) ?? 0) + Number(installment.amount));
+    if (viewMode === "open") {
+      for (const group of openData?.openCardGroups ?? []) {
+        for (const purchase of group.purchases) {
+          for (const installment of purchase.open_installments) {
+            totals.set(installment.category, (totals.get(installment.category) ?? 0) + Number(installment.amount));
+          }
+        }
+      }
+    } else {
+      for (const invoice of data?.invoices ?? []) {
+        for (const installment of invoice.card_installments) {
+          totals.set(installment.category, (totals.get(installment.category) ?? 0) + Number(installment.amount));
+        }
       }
     }
 
@@ -98,10 +127,16 @@ export default function InicioPage() {
       }))
       .filter((category) => category.total > 0)
       .sort((a, b) => b.total - a.total);
-  }, [data, summary.spent]);
+  }, [data, openData, summary.spent, viewMode]);
+
+  const cashAccounts = viewMode === "open" ? openData?.cashAccounts ?? [] : data?.cashAccounts ?? [];
+  const visibleExpenses = viewMode === "open" ? openData?.expenses ?? [] : data?.expenses ?? [];
+  const visiblePayables = viewMode === "open" ? openData?.payables ?? [] : data?.payables ?? [];
+  const titleLabel = viewMode === "open" ? "Em aberto" : monthLabel(month);
+  const payableTitle = viewMode === "open" ? "Tudo em aberto" : `A pagar em ${monthLabel(month)}`;
 
   function chooseCashAccount() {
-    const accounts = data?.cashAccounts.filter((account) => account.is_active) ?? [];
+    const accounts = cashAccounts.filter((account) => account.is_active);
     if (accounts.length === 0) return null;
     const options = accounts.map((account, index) => `${index + 1}. ${account.name} (${formatCurrency(account.balance)})`).join("\n");
     const choice = window.prompt(`Escolha a conta de caixa para baixar o pagamento, ou deixe vazio para nao mexer no caixa:\n${options}`);
@@ -130,15 +165,32 @@ export default function InicioPage() {
 
   return (
     <AuthGuard>
-      <AppShell title="Inicio" subtitle={monthLabel(month)}>
+      <AppShell title="Inicio" subtitle={titleLabel}>
         {!hasSupabaseConfig() ? <ConfigNotice /> : null}
-        <div className="mb-5 flex items-center gap-3">
+        <div className="mb-5 flex flex-wrap items-center gap-3">
           <input
             type="month"
             value={month}
+            disabled={viewMode === "open"}
             onChange={(event) => setMonth(event.target.value)}
-            className="h-12 rounded-lg border border-gray-300 bg-white px-3 text-sm font-semibold outline-none focus:border-gray-900"
+            className="h-12 rounded-lg border border-gray-300 bg-white px-3 text-sm font-semibold outline-none focus:border-gray-900 disabled:bg-gray-100 disabled:text-gray-400"
           />
+          <div className="grid h-12 grid-cols-2 rounded-lg border border-gray-300 bg-white p-1">
+            <button
+              type="button"
+              onClick={() => setViewMode("month")}
+              className={`rounded-md px-3 text-sm font-bold ${viewMode === "month" ? "bg-gray-950 text-white" : "text-gray-600"}`}
+            >
+              Mes
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode("open")}
+              className={`rounded-md px-3 text-sm font-bold ${viewMode === "open" ? "bg-gray-950 text-white" : "text-gray-600"}`}
+            >
+              Em aberto
+            </button>
+          </div>
           {loading ? <span className="text-sm text-gray-500">Atualizando...</span> : null}
         </div>
         {error ? <p className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
@@ -154,6 +206,7 @@ export default function InicioPage() {
         <CategorySummary
           categories={categoryTotals}
           total={summary.spent}
+          contextLabel={viewMode === "open" ? "pendencias em aberto" : "mes selecionado"}
           expanded={showCategoryDetails}
           onToggle={() => setShowCategoryDetails((current) => !current)}
         />
@@ -161,17 +214,20 @@ export default function InicioPage() {
         <section className="space-y-5">
           <div className="flex items-center gap-2">
             <WalletCards size={20} />
-            <h2 className="text-lg font-bold">A pagar em {monthLabel(month)}</h2>
+            <h2 className="text-lg font-bold">{payableTitle}</h2>
             <span className="ml-auto rounded-full bg-amber-100 px-3 py-1 text-sm font-bold text-amber-700">
               {formatCurrency(summary.pending)}
             </span>
           </div>
 
-          {(data?.invoices.length ?? 0) === 0 && (data?.expenses.length ?? 0) === 0 && (data?.payables.length ?? 0) === 0 && (data?.entries.length ?? 0) === 0 ? (
+          {viewMode === "month" && (data?.invoices.length ?? 0) === 0 && visibleExpenses.length === 0 && visiblePayables.length === 0 && (data?.entries.length ?? 0) === 0 ? (
             <EmptyState title="Nenhum registro neste mes." actionLabel="Registrar agora" href="/registrar" />
           ) : null}
+          {viewMode === "open" && (openData?.openCardGroups.length ?? 0) === 0 && visibleExpenses.length === 0 && visiblePayables.length === 0 ? (
+            <EmptyState title="Nada em aberto." actionLabel="Registrar" href="/registrar" />
+          ) : null}
 
-          {data?.invoices.map((invoice) => {
+          {viewMode === "month" ? data?.invoices.map((invoice) => {
             const expanded = Boolean(expandedInvoices[invoice.id]);
             const total = invoiceTotal(invoice.card_installments);
             return (
@@ -223,12 +279,21 @@ export default function InicioPage() {
                 ) : null}
               </div>
             );
-          })}
+          }) : null}
 
-          <GroupedExpenses expenses={data?.expenses ?? []} onToggle={(item) => toggle("expenses", item.id, item.status)} />
-          <GroupedPayables payables={data?.payables ?? []} onToggle={(item) => toggle("payables", item.id, item.status)} />
+          {viewMode === "open" ? openData?.openCardGroups.map((group) => (
+            <OpenCardGroupView
+              key={group.card_id}
+              group={group}
+              expanded={Boolean(expandedInvoices[`open-${group.card_id}`])}
+              onToggle={() => toggleInvoiceDetails(`open-${group.card_id}`)}
+            />
+          )) : null}
 
-          <div className="rounded-lg border border-gray-200 bg-white">
+          <GroupedExpenses expenses={visibleExpenses} onToggle={(item) => toggle("expenses", item.id, item.status)} />
+          <GroupedPayables payables={visiblePayables} onToggle={(item) => toggle("payables", item.id, item.status)} />
+
+          {viewMode === "month" ? <div className="rounded-lg border border-gray-200 bg-white">
             <div className="border-b border-gray-100 p-4">
               <h3 className="font-bold">Entradas</h3>
             </div>
@@ -247,7 +312,7 @@ export default function InicioPage() {
                 ))}
               </div>
             )}
-          </div>
+          </div> : null}
         </section>
       </AppShell>
     </AuthGuard>
@@ -271,11 +336,13 @@ function SummaryCard({ label, value, tone, wide }: { label: string; value: numbe
 function CategorySummary({
   categories,
   total,
+  contextLabel,
   expanded,
   onToggle,
 }: {
   categories: CategoryTotal[];
   total: number;
+  contextLabel: string;
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -289,7 +356,7 @@ function CategorySummary({
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
             <h2 className="font-bold">Gastos por categoria</h2>
-            <p className="text-sm text-gray-500">{expanded ? "Detalhes do mes selecionado" : "Toque para ver detalhes"}</p>
+            <p className="text-sm text-gray-500">{expanded ? `Detalhes de ${contextLabel}` : "Toque para ver detalhes"}</p>
           </div>
           <div className="text-right">
             <p className="text-sm font-bold text-gray-900">{formatCurrency(total)}</p>
@@ -394,6 +461,47 @@ function InvoiceInstallmentRow({ href, title, category, amount, date }: { href: 
       </div>
       <p className="font-bold">{formatCurrency(amount)}</p>
     </Link>
+  );
+}
+
+function OpenCardGroupView({ group, expanded, onToggle }: { group: OpenCardGroup; expanded: boolean; onToggle: () => void }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+      <button type="button" onClick={onToggle} className="flex w-full items-center justify-between gap-3 p-4 text-left">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="size-3 rounded-full" style={{ background: group.card?.color ?? "#111827" }} />
+            <h3 className="truncate font-bold">{group.card?.name ?? "Cartao"}</h3>
+            <ChevronDown className={`shrink-0 text-gray-500 transition-transform ${expanded ? "rotate-180" : ""}`} size={18} />
+          </div>
+          <p className="mt-1 text-sm text-gray-500">
+            {group.purchases.length} compra{group.purchases.length === 1 ? "" : "s"} com saldo aberto
+          </p>
+        </div>
+        <div className="shrink-0 text-right">
+          <p className="font-bold text-gray-950">{formatCurrency(group.total)}</p>
+          <span className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-1 text-xs font-bold text-amber-700">Aberto</span>
+        </div>
+      </button>
+      {expanded ? (
+        <div className="divide-y divide-gray-100 border-t border-gray-100">
+          {group.purchases.map((purchase) => (
+            <Link key={purchase.id} href={`/compras/${purchase.id}`} className="flex items-center justify-between gap-3 p-4 transition hover:bg-gray-50 active:bg-gray-100">
+              <div className="min-w-0 flex-1">
+                <p className="truncate font-semibold">{purchase.description}</p>
+                <p className="text-sm text-gray-500">
+                  {purchase.is_recurring
+                    ? "Assinatura do mes atual"
+                    : `${purchase.open_installments_count} parcela${purchase.open_installments_count === 1 ? "" : "s"} faltando`}
+                  {purchase.next_due_date ? ` - proxima em ${formatDateBr(purchase.next_due_date)}` : ""}
+                </p>
+              </div>
+              <p className="shrink-0 font-bold">{formatCurrency(purchase.open_total)}</p>
+            </Link>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

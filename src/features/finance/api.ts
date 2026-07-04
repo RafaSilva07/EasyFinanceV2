@@ -16,7 +16,7 @@ import type {
   Payable,
   PaymentStatus,
 } from "@/types/finance";
-import { monthRange } from "@/lib/dates/format";
+import { currentMonthValue, monthRange } from "@/lib/dates/format";
 import { getInvoiceDueDate, toIsoDate } from "@/lib/dates/invoice";
 
 export type MonthData = {
@@ -30,6 +30,27 @@ export type MonthData = {
 
 export type CardPurchaseDetails = CardPurchaseWithProgress & {
   card_installments: (CardInstallment & { card_invoices?: CardInvoice | null })[];
+};
+
+export type OpenCardPurchase = CardPurchaseWithProgress & {
+  open_installments: (CardInstallment & { card_invoices?: CardInvoice | null })[];
+  open_total: number;
+  open_installments_count: number;
+};
+
+export type OpenCardGroup = {
+  card_id: string;
+  card?: Card | null;
+  total: number;
+  purchases: OpenCardPurchase[];
+};
+
+export type OpenData = {
+  cards: Card[];
+  expenses: Expense[];
+  payables: Payable[];
+  cashAccounts: CashAccountWithBalance[];
+  openCardGroups: OpenCardGroup[];
 };
 
 async function currentUserId(supabase: SupabaseClient) {
@@ -108,6 +129,72 @@ export async function fetchMonthData(supabase: SupabaseClient, monthValue: strin
     payables: (payables.data ?? []) as Payable[],
     cashAccounts: withCashBalances((cashAccounts.data ?? []) as CashAccount[], (cashTransactions.data ?? []) as CashTransaction[]),
     invoices: (invoices.data ?? []) as (CardInvoiceWithCard & { card_installments: CardInstallment[] })[],
+  };
+}
+
+export async function fetchOpenData(supabase: SupabaseClient): Promise<OpenData> {
+  const { year: currentYear, month: currentMonth } = monthRange(currentMonthValue());
+  const [cards, expenses, payables, purchases, cashAccounts, cashTransactions] = await Promise.all([
+    supabase.from("cards").select("*").order("name"),
+    supabase.from("expenses").select("*").eq("status", "pending").order("due_date"),
+    supabase.from("payables").select("*").eq("status", "pending").order("due_date"),
+    supabase
+      .from("card_purchases")
+      .select("*, cards(*), card_installments(*, card_invoices(*))")
+      .eq("status", "active")
+      .order("purchase_date", { ascending: false }),
+    supabase.from("cash_accounts").select("*").order("name"),
+    supabase.from("cash_transactions").select("*"),
+  ]);
+
+  const error = cards.error ?? expenses.error ?? payables.error ?? purchases.error ?? cashAccounts.error ?? cashTransactions.error;
+  if (error) throw error;
+
+  const groups = new Map<string, OpenCardGroup>();
+  for (const purchase of purchases.data ?? []) {
+    const installments = ((purchase.card_installments ?? []) as (CardInstallment & { card_invoices?: CardInvoice | null })[])
+      .filter((installment) => installment.card_invoices?.status !== "paid")
+      .filter((installment) => {
+        if (!purchase.is_recurring) return true;
+        return installment.invoice_year === currentYear && installment.invoice_month === currentMonth;
+      })
+      .sort((a, b) => a.due_date.localeCompare(b.due_date));
+
+    if (installments.length === 0) continue;
+
+    const openTotal = installments.reduce((sum, installment) => sum + Number(installment.amount), 0);
+    const openPurchase = {
+      ...purchase,
+      open_installments: installments,
+      open_total: openTotal,
+      open_installments_count: installments.length,
+      paid_installments: (purchase.card_installments ?? []).filter((installment: CardInstallment & { card_invoices?: CardInvoice | null }) => installment.card_invoices?.status === "paid").length,
+      active_installments: (purchase.card_installments ?? []).length,
+      next_due_date: installments[0]?.due_date ?? null,
+      has_paid_invoice: (purchase.card_installments ?? []).some((installment: CardInstallment & { card_invoices?: CardInvoice | null }) => installment.card_invoices?.status === "paid"),
+    } as OpenCardPurchase;
+
+    const cardId = purchase.card_id;
+    const existing = groups.get(cardId);
+    if (existing) {
+      existing.total += openTotal;
+      existing.purchases.push(openPurchase);
+    } else {
+      groups.set(cardId, {
+        card_id: cardId,
+        card: purchase.cards,
+        total: openTotal,
+        purchases: [openPurchase],
+      });
+    }
+  }
+
+  return {
+    cards: (cards.data ?? []) as Card[],
+    expenses: (expenses.data ?? []) as Expense[],
+    payables: (payables.data ?? []) as Payable[],
+    cashAccounts: withCashBalances((cashAccounts.data ?? []) as CashAccount[], (cashTransactions.data ?? []) as CashTransaction[]),
+    openCardGroups: [...groups.values()].sort((a, b) => b.total - a.total),
   };
 }
 
