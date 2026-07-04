@@ -162,6 +162,9 @@ export default function InicioPage() {
           <div className="flex items-center gap-2">
             <WalletCards size={20} />
             <h2 className="text-lg font-bold">A pagar em {monthLabel(month)}</h2>
+            <span className="ml-auto rounded-full bg-amber-100 px-3 py-1 text-sm font-bold text-amber-700">
+              {formatCurrency(summary.pending)}
+            </span>
           </div>
 
           {(data?.invoices.length ?? 0) === 0 && (data?.expenses.length ?? 0) === 0 && (data?.payables.length ?? 0) === 0 && (data?.entries.length ?? 0) === 0 ? (
