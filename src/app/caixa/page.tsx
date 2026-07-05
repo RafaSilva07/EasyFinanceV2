@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { ArrowDownLeft, ArrowRightLeft, ArrowUpRight, Edit3, Landmark, Plus, Trash2, X } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
@@ -311,8 +312,11 @@ export default function CaixaPage() {
         </section>
 
         <section className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
-          <div className="border-b border-gray-100 p-4">
+          <div className="flex items-center justify-between gap-3 border-b border-gray-100 p-4">
             <h2 className="font-bold">Historico recente</h2>
+            <Link href="/caixa/historico" className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-bold text-gray-700">
+              Ver completo
+            </Link>
           </div>
           {transactions.length === 0 ? (
             <p className="p-4 text-sm text-gray-500">Nenhuma movimentacao registrada.</p>

@@ -102,6 +102,39 @@ export async function fetchCashData(supabase: SupabaseClient) {
   };
 }
 
+export async function fetchCashHistory(
+  supabase: SupabaseClient,
+  filters: {
+    start?: string;
+    end?: string;
+    accountId?: string;
+    type?: string;
+    sourceType?: string;
+  },
+) {
+  const accountsPromise = supabase.from("cash_accounts").select("*").order("is_active", { ascending: false }).order("name");
+  let query = supabase
+    .from("cash_transactions")
+    .select("*, cash_accounts(name, color)")
+    .order("date", { ascending: false })
+    .order("created_at", { ascending: false });
+
+  if (filters.start) query = query.gte("date", filters.start);
+  if (filters.end) query = query.lte("date", filters.end);
+  if (filters.accountId && filters.accountId !== "all") query = query.eq("account_id", filters.accountId);
+  if (filters.type && filters.type !== "all") query = query.eq("type", filters.type);
+  if (filters.sourceType && filters.sourceType !== "all") query = query.eq("source_type", filters.sourceType);
+
+  const [accounts, transactions] = await Promise.all([accountsPromise, query]);
+  const error = accounts.error ?? transactions.error;
+  if (error) throw error;
+
+  return {
+    accounts: (accounts.data ?? []) as CashAccount[],
+    transactions: (transactions.data ?? []) as (CashTransaction & { cash_accounts?: Pick<CashAccount, "name" | "color"> | null })[],
+  };
+}
+
 export async function fetchMonthData(supabase: SupabaseClient, monthValue: string): Promise<MonthData> {
   const { start, end, year, month } = monthRange(monthValue);
   const [cards, entries, expenses, payables, invoices, cashAccounts, cashTransactions] = await Promise.all([
