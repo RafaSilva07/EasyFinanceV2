@@ -1,11 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDownLeft, ArrowRightLeft, ArrowUpRight, Landmark, Plus } from "lucide-react";
+import { ArrowDownLeft, ArrowRightLeft, ArrowUpRight, Edit3, Landmark, Plus, Trash2, X } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
-import { createCashTransaction, createCashTransfer, fetchCashData, saveCashAccount } from "@/features/finance/api";
+import { createCashTransaction, createCashTransfer, deleteCashAccount, fetchCashData, saveCashAccount } from "@/features/finance/api";
 import { formatDateBr } from "@/lib/dates/format";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
@@ -17,6 +17,10 @@ const parseMoney = (value: string) => Number(value.replace(/\./g, "").replace(",
 export default function CaixaPage() {
   const [accounts, setAccounts] = useState<CashAccountWithBalance[]>([]);
   const [transactions, setTransactions] = useState<(CashTransaction & { cash_accounts?: { name: string; color: string } | null })[]>([]);
+  const [editingAccount, setEditingAccount] = useState<CashAccountWithBalance | null>(null);
+  const [editAccountName, setEditAccountName] = useState("");
+  const [editAccountColor, setEditAccountColor] = useState("#111827");
+  const [editAccountActive, setEditAccountActive] = useState(true);
   const [accountName, setAccountName] = useState("");
   const [accountColor, setAccountColor] = useState("#111827");
   const [transactionAccountId, setTransactionAccountId] = useState("");
@@ -73,6 +77,51 @@ export default function CaixaPage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel criar a conta.");
+    }
+  }
+
+  function startEditAccount(account: CashAccountWithBalance) {
+    setEditingAccount(account);
+    setEditAccountName(account.name);
+    setEditAccountColor(account.color);
+    setEditAccountActive(account.is_active);
+    setError("");
+    setFeedback("");
+  }
+
+  async function updateAccount(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingAccount || !editAccountName.trim()) {
+      setError("Informe o nome da conta.");
+      return;
+    }
+    setError("");
+    setFeedback("");
+    try {
+      await saveCashAccount(
+        createClient(),
+        { name: editAccountName.trim(), color: editAccountColor, is_active: editAccountActive },
+        editingAccount.id,
+      );
+      setEditingAccount(null);
+      setFeedback("Conta atualizada.");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Nao foi possivel editar a conta.");
+    }
+  }
+
+  async function removeAccount(account: CashAccountWithBalance) {
+    const confirmed = window.confirm(`Excluir a conta "${account.name}"? Contas com movimentacoes devem ser inativadas para preservar o historico.`);
+    if (!confirmed) return;
+    setError("");
+    setFeedback("");
+    try {
+      await deleteCashAccount(createClient(), account.id);
+      setFeedback("Conta excluida.");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Nao foi possivel excluir a conta.");
     }
   }
 
@@ -150,16 +199,53 @@ export default function CaixaPage() {
           ) : (
             accounts.map((account) => (
               <div key={account.id} className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-                <div className="flex items-center gap-2">
-                  <span className="size-3 rounded-full" style={{ background: account.color }} />
-                  <p className="truncate font-bold">{account.name}</p>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="size-3 rounded-full" style={{ background: account.color }} />
+                      <p className="truncate font-bold">{account.name}</p>
+                    </div>
+                    <p className={`mt-3 text-xl font-bold ${account.balance >= 0 ? "text-gray-950" : "text-red-600"}`}>{formatCurrency(account.balance)}</p>
+                    <p className="mt-1 text-xs text-gray-500">{account.is_active ? "Ativa" : "Inativa"}</p>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <button type="button" onClick={() => startEditAccount(account)} aria-label="Editar conta" title="Editar conta" className="grid size-9 place-items-center rounded-lg border border-gray-200 text-gray-700">
+                      <Edit3 size={16} />
+                    </button>
+                    <button type="button" onClick={() => removeAccount(account)} aria-label="Excluir conta" title="Excluir conta" className="grid size-9 place-items-center rounded-lg border border-red-200 text-red-700">
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </div>
-                <p className={`mt-3 text-xl font-bold ${account.balance >= 0 ? "text-gray-950" : "text-red-600"}`}>{formatCurrency(account.balance)}</p>
-                <p className="mt-1 text-xs text-gray-500">{account.is_active ? "Ativa" : "Inativa"}</p>
               </div>
             ))
           )}
         </section>
+
+        {editingAccount ? (
+          <div className="fixed inset-0 z-40 flex items-end bg-black/40 p-4 sm:items-center sm:justify-center">
+            <form onSubmit={updateAccount} className="w-full max-w-md rounded-lg bg-white p-4 shadow-xl">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <h2 className="font-bold">Editar conta</h2>
+                <button type="button" onClick={() => setEditingAccount(null)} aria-label="Fechar" className="grid size-9 place-items-center rounded-lg border border-gray-200">
+                  <X size={17} />
+                </button>
+              </div>
+              <div className="space-y-3">
+                <Input label="Nome" value={editAccountName} onChange={setEditAccountName} />
+                <label className="block">
+                  <span className="mb-1 block text-sm font-medium text-gray-700">Cor</span>
+                  <input type="color" value={editAccountColor} onChange={(event) => setEditAccountColor(event.target.value)} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-2" />
+                </label>
+                <label className="flex min-h-11 items-center justify-between rounded-lg border border-gray-200 px-3">
+                  <span className="text-sm font-medium text-gray-700">Conta ativa</span>
+                  <input type="checkbox" checked={editAccountActive} onChange={(event) => setEditAccountActive(event.target.checked)} className="size-5 accent-gray-950" />
+                </label>
+                <button type="submit" className="h-11 w-full rounded-lg bg-gray-950 font-bold text-white">Salvar alteracoes</button>
+              </div>
+            </form>
+          </div>
+        ) : null}
 
         <section className="mb-5 grid gap-4 lg:grid-cols-3">
           <form onSubmit={createAccount} className="space-y-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">

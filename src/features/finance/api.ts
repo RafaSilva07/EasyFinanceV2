@@ -330,6 +330,20 @@ export async function saveCashAccount(
   if (error) throw error;
 }
 
+export async function deleteCashAccount(supabase: SupabaseClient, id: string) {
+  const { count, error: countError } = await supabase
+    .from("cash_transactions")
+    .select("id", { count: "exact", head: true })
+    .eq("account_id", id);
+  if (countError) throw countError;
+  if ((count ?? 0) > 0) {
+    throw new Error("Esta conta tem movimentacoes. Marque como inativa para preservar o historico.");
+  }
+
+  const { error } = await supabase.from("cash_accounts").delete().eq("id", id);
+  if (error) throw error;
+}
+
 export async function createCashTransaction(
   supabase: SupabaseClient,
   values: Pick<CashTransaction, "account_id" | "type" | "amount" | "date" | "description" | "source_type" | "source_id" | "notes">,
