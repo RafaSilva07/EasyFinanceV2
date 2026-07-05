@@ -11,7 +11,25 @@ import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import type { CashAccountWithBalance, CashTransaction } from "@/types/finance";
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+};
+const todayBr = () => {
+  const [year, month, day] = today().split("-");
+  return `${day}/${month}/${year}`;
+};
+const maskDateBr = (value: string) => {
+  const digits = value.replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+};
+const dateBrToIso = (value: string) => {
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(value)) return null;
+  const [day, month, year] = value.split("/");
+  return `${year}-${month}-${day}`;
+};
 const parseMoney = (value: string) => Number(value.replace(/\./g, "").replace(",", "."));
 
 export default function CaixaPage() {
@@ -26,12 +44,12 @@ export default function CaixaPage() {
   const [transactionAccountId, setTransactionAccountId] = useState("");
   const [transactionType, setTransactionType] = useState<"income" | "expense">("income");
   const [transactionAmount, setTransactionAmount] = useState("");
-  const [transactionDate, setTransactionDate] = useState(today());
+  const [transactionDate, setTransactionDate] = useState(todayBr());
   const [transactionDescription, setTransactionDescription] = useState("");
   const [fromAccountId, setFromAccountId] = useState("");
   const [toAccountId, setToAccountId] = useState("");
   const [transferAmount, setTransferAmount] = useState("");
-  const [transferDate, setTransferDate] = useState(today());
+  const [transferDate, setTransferDate] = useState(todayBr());
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -128,8 +146,9 @@ export default function CaixaPage() {
   async function createManualTransaction(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const amount = parseMoney(transactionAmount);
-    if (!transactionAccountId || !Number.isFinite(amount) || amount <= 0 || !transactionDescription.trim()) {
-      setError("Preencha conta, descricao e valor valido.");
+    const isoDate = dateBrToIso(transactionDate);
+    if (!transactionAccountId || !Number.isFinite(amount) || amount <= 0 || !transactionDescription.trim() || !isoDate) {
+      setError("Preencha conta, descricao, valor e data valida.");
       return;
     }
     setError("");
@@ -139,7 +158,7 @@ export default function CaixaPage() {
         account_id: transactionAccountId,
         type: transactionType,
         amount: transactionType === "income" ? amount : -amount,
-        date: transactionDate,
+        date: isoDate,
         description: transactionDescription.trim(),
         source_type: "manual",
         source_id: null,
@@ -157,8 +176,9 @@ export default function CaixaPage() {
   async function createTransfer(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const amount = parseMoney(transferAmount);
-    if (!fromAccountId || !toAccountId || fromAccountId === toAccountId || !Number.isFinite(amount) || amount <= 0) {
-      setError("Escolha duas contas diferentes e um valor valido.");
+    const isoDate = dateBrToIso(transferDate);
+    if (!fromAccountId || !toAccountId || fromAccountId === toAccountId || !Number.isFinite(amount) || amount <= 0 || !isoDate) {
+      setError("Escolha duas contas diferentes, um valor e uma data valida.");
       return;
     }
     setError("");
@@ -168,7 +188,7 @@ export default function CaixaPage() {
         from_account_id: fromAccountId,
         to_account_id: toAccountId,
         amount,
-        date: transferDate,
+        date: isoDate,
         description: "Transferencia entre contas",
         notes: null,
       });
@@ -270,7 +290,7 @@ export default function CaixaPage() {
             </Select>
             <Input label="Descricao" value={transactionDescription} onChange={setTransactionDescription} />
             <Input label="Valor" value={transactionAmount} onChange={setTransactionAmount} inputMode="decimal" placeholder="100,00" />
-            <Input label="Data" value={transactionDate} onChange={setTransactionDate} type="date" />
+            <DateInput label="Data" value={transactionDate} onChange={setTransactionDate} />
             <button type="submit" className="h-11 w-full rounded-lg bg-gray-950 font-bold text-white">Salvar</button>
           </form>
 
@@ -285,7 +305,7 @@ export default function CaixaPage() {
               {accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
             </Select>
             <Input label="Valor" value={transferAmount} onChange={setTransferAmount} inputMode="decimal" placeholder="100,00" />
-            <Input label="Data" value={transferDate} onChange={setTransferDate} type="date" />
+            <DateInput label="Data" value={transferDate} onChange={setTransferDate} />
             <button type="submit" className="h-11 w-full rounded-lg bg-gray-950 font-bold text-white">Transferir</button>
           </form>
         </section>
@@ -320,6 +340,22 @@ function Input({ label, value, onChange, ...props }: Omit<React.InputHTMLAttribu
     <label className="block">
       <span className="mb-1 block text-sm font-medium text-gray-700">{label}</span>
       <input {...props} value={value} onChange={(event) => onChange(event.target.value)} className="h-11 w-full rounded-lg border border-gray-300 px-3 outline-none focus:border-gray-900" />
+    </label>
+  );
+}
+
+function DateInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-sm font-medium text-gray-700">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(maskDateBr(event.target.value))}
+        inputMode="numeric"
+        placeholder="dd/mm/aaaa"
+        maxLength={10}
+        className="h-11 w-full rounded-lg border border-gray-300 px-3 outline-none focus:border-gray-900"
+      />
     </label>
   );
 }

@@ -17,7 +17,10 @@ import { formatCurrency, toNumber } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import type { Card } from "@/types/finance";
 
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+};
 const todayBr = () => {
   const [year, month, day] = today().split("-");
   return `${day}/${month}/${year}`;
