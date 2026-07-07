@@ -114,7 +114,7 @@ export default function ListaPage() {
         ...data.payables.map((item: Payable) => ({
           id: item.id,
           type: "payable" as const,
-          title: item.description,
+          title: `${item.description}${item.installments_count > 1 ? ` ${item.installment_number}/${item.installments_count}` : ""}`,
           amount: Number(item.amount),
           date: item.due_date,
           purchaseDate: item.purchase_date,

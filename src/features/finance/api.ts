@@ -342,12 +342,46 @@ export async function createExpense(
   if (error) throw error;
 }
 
+function addMonthsClamped(dateIso: string, offset: number) {
+  const [year, month, day] = dateIso.split("-").map(Number);
+  const target = new Date(year, month - 1 + offset, 1);
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(day, lastDay));
+  return toIsoDate(target);
+}
+
+function splitAmount(total: number, count: number) {
+  const cents = Math.round(Number(total) * 100);
+  const base = Math.floor(cents / count);
+  const remainder = cents - base * count;
+  return Array.from({ length: count }, (_, index) => (base + (index === count - 1 ? remainder : 0)) / 100);
+}
+
 export async function createPayable(
   supabase: SupabaseClient,
-  values: Pick<Payable, "description" | "amount" | "purchase_date" | "due_date" | "category" | "status" | "notes">,
+  values: Pick<Payable, "description" | "amount" | "purchase_date" | "due_date" | "category" | "status" | "notes"> & {
+    installments_count?: number;
+  },
 ) {
   const user_id = await currentUserId(supabase);
-  const { error } = await supabase.from("payables").insert({ ...values, user_id });
+  const installmentsCount = Math.max(1, Number(values.installments_count ?? 1));
+  const payableGroupId = crypto.randomUUID();
+  const amounts = splitAmount(Number(values.amount), installmentsCount);
+  const rows = amounts.map((amount, index) => ({
+    user_id,
+    description: values.description,
+    amount,
+    purchase_date: values.purchase_date,
+    due_date: addMonthsClamped(values.due_date, index),
+    category: values.category,
+    status: values.status,
+    payable_group_id: payableGroupId,
+    installment_number: index + 1,
+    installments_count: installmentsCount,
+    notes: values.notes,
+  }));
+
+  const { error } = await supabase.from("payables").insert(rows);
   if (error) throw error;
 }
 

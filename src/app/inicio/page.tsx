@@ -546,7 +546,7 @@ function GroupedPayables({ payables, onToggle }: { payables: Payable[]; onToggle
           {payables.map((payable) => (
             <PaymentRow
               key={payable.id}
-              title={payable.description}
+              title={`${payable.description}${payable.installments_count > 1 ? ` ${payable.installment_number}/${payable.installments_count}` : ""}`}
               subtitle={`${getCategoryLabel(payable.category)} - compra em ${formatDateBr(payable.purchase_date)}`}
               amount={Number(payable.amount)}
               date={payable.due_date}

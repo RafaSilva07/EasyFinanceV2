@@ -126,6 +126,9 @@ export type Payable = {
   due_date: string;
   category: ExpenseCategory;
   status: PaymentStatus;
+  payable_group_id: string;
+  installment_number: number;
+  installments_count: number;
   cash_transaction_id: string | null;
   notes: string | null;
   created_at: string;

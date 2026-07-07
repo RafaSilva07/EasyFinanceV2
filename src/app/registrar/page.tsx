@@ -86,6 +86,7 @@ const payableSchema = z.object({
   due_date: dateBr,
   category: z.enum(["food", "housing", "transport", "subscriptions", "leisure", "health", "gifts", "personal", "education", "other"]),
   status: z.enum(["pending", "paid"]),
+  installments_count: z.coerce.number().int().min(1, "Minimo 1 parcela"),
   notes: optionalText,
 });
 
@@ -292,19 +293,27 @@ function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
 function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
   const form = useForm<PayableInput, unknown, PayableForm>({
     resolver: zodResolver(payableSchema),
-    defaultValues: { purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", description: "", amount: "", notes: "" },
+    defaultValues: { purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", installments_count: 1, description: "", amount: "", notes: "" },
   });
   const purchaseDateValue = useWatch({ control: form.control, name: "purchase_date" }) ?? "";
   const dueDateValue = useWatch({ control: form.control, name: "due_date" }) ?? "";
+  const watchedAmount = useWatch({ control: form.control, name: "amount" });
+  const watchedInstallments = useWatch({ control: form.control, name: "installments_count" });
+  const amount = toNumber(String(watchedAmount ?? ""));
+  const installmentsCount = Math.max(1, Number(watchedInstallments ?? 1));
+  const installmentAmount = Number.isFinite(amount) && amount > 0 ? amount / installmentsCount : 0;
   async function submit(values: PayableForm) {
     try {
       await createPayable(createClient(), values);
-      form.reset({ purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", description: "", amount: "", notes: "" });
+      form.reset({ purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", installments_count: 1, description: "", amount: "", notes: "" });
       const monthValue = values.due_date.slice(0, 7);
+      const count = Number(values.installments_count);
       onFeedback({
         tone: "success",
         title: "Conta a pagar registrada",
-        description: `Ela ja aparece em ${monthLabel(monthValue)} como ${values.status === "paid" ? "paga" : "pendente"}.`,
+        description: count === 1
+          ? `Ela ja aparece em ${monthLabel(monthValue)} como ${values.status === "paid" ? "paga" : "pendente"}.`
+          : `${count} parcelas foram criadas a partir de ${monthLabel(monthValue)}.`,
         href: `/inicio?mes=${monthValue}`,
         hrefLabel: "Ver no Inicio",
       });
@@ -315,7 +324,7 @@ function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
   return (
     <FormCard onSubmit={form.handleSubmit(submit)} submitLabel="Salvar conta a pagar">
       <TextInput label="Descricao" error={form.formState.errors.description?.message} {...form.register("description")} />
-      <TextInput label="Valor" inputMode="decimal" placeholder="250,00" error={form.formState.errors.amount?.message} {...form.register("amount")} />
+      <TextInput label="Valor total" inputMode="decimal" placeholder="250,00" error={form.formState.errors.amount?.message} {...form.register("amount")} />
       <DateInput
         label="Data da compra"
         error={form.formState.errors.purchase_date?.message}
@@ -331,6 +340,13 @@ function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
         onBlur={() => form.trigger("due_date")}
       />
       <CategorySelect {...form.register("category")} />
+      <TextInput label="Quantidade de parcelas" type="number" min="1" error={form.formState.errors.installments_count?.message} {...form.register("installments_count")} />
+      {installmentsCount > 1 ? (
+        <div className="rounded-lg bg-gray-100 p-4">
+          <p className="text-sm text-gray-500">Valor aproximado da parcela</p>
+          <p className="text-xl font-bold">{formatCurrency(installmentAmount)}</p>
+        </div>
+      ) : null}
       <Select label="Status" {...form.register("status")}>
         <option value="pending">Pendente</option>
         <option value="paid">Pago</option>
