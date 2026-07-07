@@ -333,12 +333,98 @@ export async function createEntry(
   if (error) throw error;
 }
 
+export async function updateEntry(
+  supabase: SupabaseClient,
+  id: string,
+  values: Pick<Entry, "description" | "amount" | "date" | "notes">,
+) {
+  const { error } = await supabase
+    .from("entries")
+    .update({ ...values, updated_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) throw error;
+}
+
+export async function deleteEntry(supabase: SupabaseClient, id: string) {
+  const { error } = await supabase.from("entries").delete().eq("id", id);
+  if (error) throw error;
+}
+
 export async function createExpense(
   supabase: SupabaseClient,
   values: Pick<Expense, "description" | "amount" | "due_date" | "payment_method" | "category" | "status" | "notes">,
 ) {
   const user_id = await currentUserId(supabase);
   const { error } = await supabase.from("expenses").insert({ ...values, user_id });
+  if (error) throw error;
+}
+
+export async function updateExpense(
+  supabase: SupabaseClient,
+  id: string,
+  values: Pick<Expense, "description" | "amount" | "due_date" | "payment_method" | "category" | "status" | "notes">,
+) {
+  const { data: current, error: findError } = await supabase
+    .from("expenses")
+    .select("*")
+    .eq("id", id)
+    .single();
+  if (findError) throw findError;
+
+  let cashTransactionId: string | null = current.cash_transaction_id ?? null;
+  if (current.status === "paid" && values.status === "pending") {
+    await reverseLinkedCashTransaction(supabase, cashTransactionId, `Estorno de ${current.description}`);
+    cashTransactionId = null;
+  } else if (
+    current.status === "paid" &&
+    values.status === "paid" &&
+    cashTransactionId &&
+    (Number(current.amount) !== Number(values.amount) ||
+      current.due_date !== values.due_date ||
+      current.description !== values.description)
+  ) {
+    const { data: transaction, error: transactionError } = await supabase
+      .from("cash_transactions")
+      .select("account_id")
+      .eq("id", cashTransactionId)
+      .maybeSingle();
+    if (transactionError) throw transactionError;
+    await reverseLinkedCashTransaction(supabase, cashTransactionId, `Estorno de edicao: ${current.description}`);
+    const nextTransaction = transaction?.account_id
+      ? await createPaymentCashOut(supabase, {
+          accountId: transaction.account_id,
+          amount: Number(values.amount),
+          date: values.due_date,
+          description: `Pagamento ${values.description}`,
+          sourceType: "expense",
+          sourceId: id,
+        })
+      : null;
+    cashTransactionId = nextTransaction?.id ?? null;
+  }
+
+  const { error } = await supabase
+    .from("expenses")
+    .update({
+      ...values,
+      cash_transaction_id: cashTransactionId,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+  if (error) throw error;
+}
+
+export async function deleteExpense(supabase: SupabaseClient, id: string) {
+  const { data: current, error: findError } = await supabase
+    .from("expenses")
+    .select("*")
+    .eq("id", id)
+    .single();
+  if (findError) throw findError;
+
+  await reverseLinkedCashTransaction(supabase, current.cash_transaction_id ?? null, `Estorno de exclusao: ${current.description}`);
+
+  const { error } = await supabase.from("expenses").delete().eq("id", id);
   if (error) throw error;
 }
 
@@ -382,6 +468,75 @@ export async function createPayable(
   }));
 
   const { error } = await supabase.from("payables").insert(rows);
+  if (error) throw error;
+}
+
+export async function updatePayable(
+  supabase: SupabaseClient,
+  id: string,
+  values: Pick<Payable, "description" | "amount" | "purchase_date" | "due_date" | "category" | "status" | "notes">,
+) {
+  const { data: current, error: findError } = await supabase
+    .from("payables")
+    .select("*")
+    .eq("id", id)
+    .single();
+  if (findError) throw findError;
+
+  let cashTransactionId: string | null = current.cash_transaction_id ?? null;
+  if (current.status === "paid" && values.status === "pending") {
+    await reverseLinkedCashTransaction(supabase, cashTransactionId, `Estorno de ${current.description}`);
+    cashTransactionId = null;
+  } else if (
+    current.status === "paid" &&
+    values.status === "paid" &&
+    cashTransactionId &&
+    (Number(current.amount) !== Number(values.amount) ||
+      current.due_date !== values.due_date ||
+      current.description !== values.description)
+  ) {
+    const { data: transaction, error: transactionError } = await supabase
+      .from("cash_transactions")
+      .select("account_id")
+      .eq("id", cashTransactionId)
+      .maybeSingle();
+    if (transactionError) throw transactionError;
+    await reverseLinkedCashTransaction(supabase, cashTransactionId, `Estorno de edicao: ${current.description}`);
+    const nextTransaction = transaction?.account_id
+      ? await createPaymentCashOut(supabase, {
+          accountId: transaction.account_id,
+          amount: Number(values.amount),
+          date: values.due_date,
+          description: `Pagamento ${values.description}`,
+          sourceType: "payable",
+          sourceId: id,
+        })
+      : null;
+    cashTransactionId = nextTransaction?.id ?? null;
+  }
+
+  const { error } = await supabase
+    .from("payables")
+    .update({
+      ...values,
+      cash_transaction_id: cashTransactionId,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+  if (error) throw error;
+}
+
+export async function deletePayable(supabase: SupabaseClient, id: string) {
+  const { data: current, error: findError } = await supabase
+    .from("payables")
+    .select("*")
+    .eq("id", id)
+    .single();
+  if (findError) throw findError;
+
+  await reverseLinkedCashTransaction(supabase, current.cash_transaction_id ?? null, `Estorno de exclusao: ${current.description}`);
+
+  const { error } = await supabase.from("payables").delete().eq("id", id);
   if (error) throw error;
 }
 

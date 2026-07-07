@@ -1,18 +1,29 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Circle, Edit3, XCircle } from "lucide-react";
+import { CheckCircle2, Circle, Edit3, Trash2, XCircle } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { cancelCardPurchase, fetchListData, updateCardPurchase, updateStatus } from "@/features/finance/api";
+import {
+  cancelCardPurchase,
+  deleteEntry,
+  deleteExpense,
+  deletePayable,
+  fetchListData,
+  updateCardPurchase,
+  updateEntry,
+  updateExpense,
+  updatePayable,
+  updateStatus,
+} from "@/features/finance/api";
 import { currentMonthRange, formatDateBr } from "@/lib/dates/format";
 import { expenseCategories, getCategoryLabel } from "@/lib/finance/categories";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import type { Card, CardPurchaseWithProgress, Expense, ExpenseCategory, Payable, PaymentStatus } from "@/types/finance";
+import type { Card, CardPurchaseWithProgress, Entry, Expense, ExpenseCategory, Payable, PaymentMethod, PaymentStatus } from "@/types/finance";
 
 const maskDateBr = (value: string) => {
   const digits = value.replace(/\D/g, "").slice(0, 8);
@@ -38,6 +49,7 @@ type ListItem =
       title: string;
       amount: number;
       date: string;
+      entry: Entry;
     }
   | {
       id: string;
@@ -47,6 +59,7 @@ type ListItem =
       date: string;
       status: PaymentStatus;
       category: ExpenseCategory;
+      expense: Expense;
     }
   | {
       id: string;
@@ -57,6 +70,7 @@ type ListItem =
       purchaseDate: string;
       status: PaymentStatus;
       category: ExpenseCategory;
+      payable: Payable;
     }
   | {
       id: string;
@@ -73,6 +87,16 @@ type ListItem =
       hasInvoiceInRange: boolean;
     };
 
+type EditableRecord = Extract<ListItem, { type: "entry" }> | Extract<ListItem, { type: "expense" }> | Extract<ListItem, { type: "payable" }>;
+
+const paymentMethodOptions: { value: PaymentMethod; label: string }[] = [
+  { value: "pix", label: "Pix" },
+  { value: "cash", label: "Dinheiro" },
+  { value: "debit", label: "Debito" },
+  { value: "boleto", label: "Boleto" },
+  { value: "other", label: "Outro" },
+];
+
 export default function ListaPage() {
   const initialRange = currentMonthRange();
   const [startDate, setStartDate] = useState(initialRange.start);
@@ -87,6 +111,7 @@ export default function ListaPage() {
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [editing, setEditing] = useState<Extract<ListItem, { type: "purchase" }> | null>(null);
+  const [editingRecord, setEditingRecord] = useState<EditableRecord | null>(null);
 
   const load = useCallback(async () => {
     if (!hasSupabaseConfig()) return;
@@ -101,6 +126,7 @@ export default function ListaPage() {
           title: item.description,
           amount: Number(item.amount),
           date: item.date,
+          entry: item,
         })),
         ...data.expenses.map((item: Expense) => ({
           id: item.id,
@@ -110,6 +136,7 @@ export default function ListaPage() {
           date: item.due_date,
           status: item.status,
           category: item.category,
+          expense: item,
         })),
         ...data.payables.map((item: Payable) => ({
           id: item.id,
@@ -120,6 +147,7 @@ export default function ListaPage() {
           purchaseDate: item.purchase_date,
           status: item.status,
           category: item.category,
+          payable: item,
         })),
         ...data.purchases.map((item) => ({
           id: item.id,
@@ -185,6 +213,28 @@ export default function ListaPage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel cancelar a compra.");
+    }
+  }
+
+  async function deleteRecord(item: EditableRecord) {
+    const confirmed = window.confirm(`Excluir "${item.title}"?`);
+    if (!confirmed) return;
+    setError("");
+    setFeedback("");
+    try {
+      if (item.type === "entry") {
+        await deleteEntry(createClient(), item.id);
+        setFeedback("Entrada excluida.");
+      } else if (item.type === "expense") {
+        await deleteExpense(createClient(), item.id);
+        setFeedback("Gasto excluido.");
+      } else {
+        await deletePayable(createClient(), item.id);
+        setFeedback("Conta a pagar excluida.");
+      }
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Nao foi possivel excluir o registro.");
     }
   }
 
@@ -278,6 +328,14 @@ export default function ListaPage() {
                     <p className={`font-bold ${item.type === "entry" ? "text-emerald-600" : "text-gray-950"}`}>{formatCurrency(item.amount)}</p>
                     {item.type === "expense" || item.type === "payable" ? <StatusBadge status={item.status} /> : null}
                   </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button type="button" onClick={() => setEditingRecord(item)} aria-label="Editar registro" title="Editar" className="rounded-lg border border-gray-200 p-2 text-gray-700">
+                      <Edit3 size={16} />
+                    </button>
+                    <button type="button" onClick={() => deleteRecord(item)} aria-label="Excluir registro" title="Excluir" className="rounded-lg border border-red-200 p-2 text-red-700">
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -291,6 +349,18 @@ export default function ListaPage() {
             onSaved={async () => {
               setEditing(null);
               setFeedback("Compra atualizada.");
+              await load();
+            }}
+            onError={setError}
+          />
+        ) : null}
+        {editingRecord ? (
+          <EditRecordDialog
+            item={editingRecord}
+            onClose={() => setEditingRecord(null)}
+            onSaved={async () => {
+              setEditingRecord(null);
+              setFeedback("Registro atualizado.");
               await load();
             }}
             onError={setError}
@@ -463,6 +533,140 @@ function EditPurchaseDialog({
             <EditField label="Parcelas" value={installmentsCount} onChange={setInstallmentsCount} type="number" />
             <EditField label="Parcela inicial" value={startInstallment} onChange={setStartInstallment} type="number" />
           </div>
+          <label className="block">
+            <span className="mb-1 block text-sm font-medium text-gray-700">Observacao</span>
+            <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} className="w-full rounded-lg border border-gray-300 px-3 py-2" />
+          </label>
+          <button type="submit" disabled={saving} className="h-12 w-full rounded-lg bg-gray-950 font-bold text-white disabled:opacity-60">
+            {saving ? "Salvando..." : "Salvar alteracoes"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function EditRecordDialog({
+  item,
+  onClose,
+  onSaved,
+  onError,
+}: {
+  item: EditableRecord;
+  onClose: () => void;
+  onSaved: () => void | Promise<void>;
+  onError: (value: string) => void;
+}) {
+  const [description, setDescription] = useState(item.title.replace(/\s\d+\/\d+$/, ""));
+  const [amount, setAmount] = useState(String(item.amount).replace(".", ","));
+  const [date, setDate] = useState(isoToBr(item.date));
+  const [purchaseDate, setPurchaseDate] = useState(item.type === "payable" ? isoToBr(item.purchaseDate) : "");
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(item.type === "expense" ? item.expense.payment_method : "pix");
+  const [category, setCategory] = useState<ExpenseCategory>(item.type === "entry" ? "other" : item.category);
+  const [status, setStatus] = useState<PaymentStatus>(item.type === "entry" ? "paid" : item.status);
+  const [notes, setNotes] = useState(
+    item.type === "entry" ? item.entry.notes ?? "" : item.type === "expense" ? item.expense.notes ?? "" : item.payable.notes ?? "",
+  );
+  const [saving, setSaving] = useState(false);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onError("");
+
+    if (!description.trim()) {
+      onError("Informe uma descricao.");
+      return;
+    }
+    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(date) || (item.type === "payable" && !/^\d{2}\/\d{2}\/\d{4}$/.test(purchaseDate))) {
+      onError("Informe as datas no formato dd/mm/aaaa.");
+      return;
+    }
+
+    const parsedAmount = Number(amount.replace(/\./g, "").replace(",", "."));
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      onError("Informe um valor valido.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      if (item.type === "entry") {
+        await updateEntry(createClient(), item.id, {
+          description: description.trim(),
+          amount: parsedAmount,
+          date: brToIso(date),
+          notes: notes.trim() || null,
+        });
+      } else if (item.type === "expense") {
+        await updateExpense(createClient(), item.id, {
+          description: description.trim(),
+          amount: parsedAmount,
+          due_date: brToIso(date),
+          payment_method: paymentMethod,
+          category,
+          status,
+          notes: notes.trim() || null,
+        });
+      } else {
+        await updatePayable(createClient(), item.id, {
+          description: description.trim(),
+          amount: parsedAmount,
+          purchase_date: brToIso(purchaseDate),
+          due_date: brToIso(date),
+          category,
+          status,
+          notes: notes.trim() || null,
+        });
+      }
+      await onSaved();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Nao foi possivel editar o registro.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-end bg-black/40 p-4 sm:items-center sm:justify-center">
+      <form onSubmit={submit} className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-lg bg-white p-4 shadow-xl">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-bold">Editar {labelType(item.type).toLowerCase()}</h2>
+          <button type="button" onClick={onClose} className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-bold">
+            Fechar
+          </button>
+        </div>
+        <div className="space-y-3">
+          <EditField label="Descricao" value={description} onChange={setDescription} />
+          <EditField label="Valor" value={amount} onChange={setAmount} inputMode="decimal" />
+          {item.type === "payable" ? (
+            <EditField label="Data da compra" value={purchaseDate} onChange={(value) => setPurchaseDate(maskDateBr(value))} inputMode="numeric" />
+          ) : null}
+          <EditField label={item.type === "entry" ? "Data" : "Vencimento"} value={date} onChange={(value) => setDate(maskDateBr(value))} inputMode="numeric" />
+          {item.type === "expense" ? (
+            <label className="block">
+              <span className="mb-1 block text-sm font-medium text-gray-700">Forma de pagamento</span>
+              <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as PaymentMethod)} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3">
+                {paymentMethodOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+          ) : null}
+          {item.type !== "entry" ? (
+            <>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium text-gray-700">Categoria</span>
+                <select value={category} onChange={(event) => setCategory(event.target.value as ExpenseCategory)} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3">
+                  {expenseCategories.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium text-gray-700">Status</span>
+                <select value={status} onChange={(event) => setStatus(event.target.value as PaymentStatus)} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3">
+                  <option value="pending">Pendente</option>
+                  <option value="paid">Pago</option>
+                </select>
+              </label>
+            </>
+          ) : null}
           <label className="block">
             <span className="mb-1 block text-sm font-medium text-gray-700">Observacao</span>
             <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} className="w-full rounded-lg border border-gray-300 px-3 py-2" />
