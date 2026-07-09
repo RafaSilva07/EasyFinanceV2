@@ -233,13 +233,16 @@ export async function fetchOpenData(supabase: SupabaseClient): Promise<OpenData>
 
 export async function fetchListData(
   supabase: SupabaseClient,
-  range: { start: string; end: string },
+  range?: { start: string; end: string },
 ) {
+  const entriesQuery = supabase.from("entries").select("*").order("date", { ascending: false });
+  const expensesQuery = supabase.from("expenses").select("*").order("due_date", { ascending: false });
+
   const [cards, entries, expenses, payables, purchases] = await Promise.all([
     supabase.from("cards").select("*").order("name"),
-    supabase.from("entries").select("*").gte("date", range.start).lte("date", range.end).order("date"),
-    supabase.from("expenses").select("*").gte("due_date", range.start).lte("due_date", range.end).order("due_date"),
-    supabase.from("payables").select("*").gte("due_date", range.start).lte("due_date", range.end).order("due_date"),
+    range ? entriesQuery.gte("date", range.start).lte("date", range.end) : entriesQuery,
+    range ? expensesQuery.gte("due_date", range.start).lte("due_date", range.end) : expensesQuery,
+    supabase.from("payables").select("*").order("due_date", { ascending: false }),
     supabase
     .from("card_purchases")
     .select("*, cards(*), card_installments(*, card_invoices(*))")
@@ -252,7 +255,7 @@ export async function fetchListData(
 
   const activePurchases = (purchases.data ?? []).map((purchase) => {
     const installments = (purchase.card_installments ?? []) as (CardInstallment & { card_invoices?: CardInvoice | null })[];
-    const installmentsInRange = installments.filter((installment) => installment.due_date >= range.start && installment.due_date <= range.end);
+    const installmentsInRange = range ? installments.filter((installment) => installment.due_date >= range.start && installment.due_date <= range.end) : installments;
     const openInstallmentsInRange = installmentsInRange.filter((installment) => installment.card_invoices?.status !== "paid");
     const activeInstallments = installments.length;
     const paidInstallments = installments.filter((installment) => installment.card_invoices?.status === "paid").length;
@@ -270,6 +273,10 @@ export async function fetchListData(
       next_due_date: nextDueDate,
       has_paid_invoice: paidInstallments > 0,
     };
+  }).filter((purchase) => {
+    if (!range) return true;
+    const purchaseInRange = purchase.purchase_date >= range.start && purchase.purchase_date <= range.end;
+    return purchaseInRange || (purchase.installments_in_range?.length ?? 0) > 0;
   }) as CardPurchaseWithProgress[];
 
   return {
@@ -524,6 +531,60 @@ export async function updatePayable(
     })
     .eq("id", id);
   if (error) throw error;
+}
+
+export async function updatePayableGroup(
+  supabase: SupabaseClient,
+  groupId: string,
+  values: Pick<Payable, "description" | "purchase_date" | "due_date" | "category" | "status" | "notes"> & {
+    amount: number;
+    installments_count: number;
+  },
+) {
+  const { data: currentRows, error: findError } = await supabase
+    .from("payables")
+    .select("*")
+    .eq("payable_group_id", groupId)
+    .order("installment_number");
+  if (findError) throw findError;
+
+  const current = (currentRows ?? []) as Payable[];
+  if (current.length === 0) throw new Error("Conta a pagar nao encontrada.");
+
+  const hasPaidInstallment = current.some((payable) => payable.status === "paid" || payable.cash_transaction_id);
+  if (hasPaidInstallment) {
+    throw new Error("Nao e possivel alterar parcelas de uma conta que ja tem parcela paga. Reabra ou remova a baixa antes.");
+  }
+
+  const user_id = await currentUserId(supabase);
+  const installmentsCount = Math.max(1, Number(values.installments_count));
+  const amounts = splitAmount(Number(values.amount), installmentsCount);
+  const now = new Date().toISOString();
+
+  const { error: deleteError } = await supabase
+    .from("payables")
+    .delete()
+    .eq("payable_group_id", groupId);
+  if (deleteError) throw deleteError;
+
+  const rows = amounts.map((amount, index) => ({
+    user_id,
+    description: values.description,
+    amount,
+    purchase_date: values.purchase_date,
+    due_date: addMonthsClamped(values.due_date, index),
+    category: values.category,
+    status: values.status,
+    payable_group_id: groupId,
+    installment_number: index + 1,
+    installments_count: installmentsCount,
+    notes: values.notes,
+    created_at: current[index]?.created_at ?? now,
+    updated_at: now,
+  }));
+
+  const { error: insertError } = await supabase.from("payables").insert(rows);
+  if (insertError) throw insertError;
 }
 
 export async function deletePayable(supabase: SupabaseClient, id: string) {

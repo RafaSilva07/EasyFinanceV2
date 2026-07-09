@@ -291,6 +291,7 @@ function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
 }
 
 function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
+  const [amountMode, setAmountMode] = useState<"total" | "installment">("total");
   const form = useForm<PayableInput, unknown, PayableForm>({
     resolver: zodResolver(payableSchema),
     defaultValues: { purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", installments_count: 1, description: "", amount: "", notes: "" },
@@ -299,13 +300,20 @@ function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
   const dueDateValue = useWatch({ control: form.control, name: "due_date" }) ?? "";
   const watchedAmount = useWatch({ control: form.control, name: "amount" });
   const watchedInstallments = useWatch({ control: form.control, name: "installments_count" });
-  const amount = toNumber(String(watchedAmount ?? ""));
+  const enteredAmount = toNumber(String(watchedAmount ?? ""));
   const installmentsCount = Math.max(1, Number(watchedInstallments ?? 1));
-  const installmentAmount = Number.isFinite(amount) && amount > 0 ? amount / installmentsCount : 0;
+  const totalAmount = Number.isFinite(enteredAmount) && enteredAmount > 0
+    ? amountMode === "installment" ? enteredAmount * installmentsCount : enteredAmount
+    : 0;
+  const installmentAmount = totalAmount > 0 ? totalAmount / installmentsCount : 0;
   async function submit(values: PayableForm) {
     try {
-      await createPayable(createClient(), values);
+      await createPayable(createClient(), {
+        ...values,
+        amount: amountMode === "installment" ? values.amount * Number(values.installments_count) : values.amount,
+      });
       form.reset({ purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", installments_count: 1, description: "", amount: "", notes: "" });
+      setAmountMode("total");
       const monthValue = values.due_date.slice(0, 7);
       const count = Number(values.installments_count);
       onFeedback({
@@ -324,7 +332,23 @@ function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
   return (
     <FormCard onSubmit={form.handleSubmit(submit)} submitLabel="Salvar conta a pagar">
       <TextInput label="Descricao" error={form.formState.errors.description?.message} {...form.register("description")} />
-      <TextInput label="Valor total" inputMode="decimal" placeholder="250,00" error={form.formState.errors.amount?.message} {...form.register("amount")} />
+      <div className="grid grid-cols-2 rounded-lg border border-gray-200 bg-white p-1">
+        <button
+          type="button"
+          onClick={() => setAmountMode("total")}
+          className={`h-10 rounded-md text-sm font-bold ${amountMode === "total" ? "bg-gray-950 text-white" : "text-gray-600"}`}
+        >
+          Valor total
+        </button>
+        <button
+          type="button"
+          onClick={() => setAmountMode("installment")}
+          className={`h-10 rounded-md text-sm font-bold ${amountMode === "installment" ? "bg-gray-950 text-white" : "text-gray-600"}`}
+        >
+          Por parcela
+        </button>
+      </div>
+      <TextInput label={amountMode === "total" ? "Valor total" : "Valor da parcela"} inputMode="decimal" placeholder={amountMode === "total" ? "250,00" : "49,90"} error={form.formState.errors.amount?.message} {...form.register("amount")} />
       <DateInput
         label="Data da compra"
         error={form.formState.errors.purchase_date?.message}
@@ -341,10 +365,10 @@ function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
       />
       <CategorySelect {...form.register("category")} />
       <TextInput label="Quantidade de parcelas" type="number" min="1" error={form.formState.errors.installments_count?.message} {...form.register("installments_count")} />
-      {installmentsCount > 1 ? (
+      {totalAmount > 0 ? (
         <div className="rounded-lg bg-gray-100 p-4">
-          <p className="text-sm text-gray-500">Valor aproximado da parcela</p>
-          <p className="text-xl font-bold">{formatCurrency(installmentAmount)}</p>
+          <p className="text-sm text-gray-500">{amountMode === "total" ? "Valor aproximado da parcela" : "Valor total calculado"}</p>
+          <p className="text-xl font-bold">{formatCurrency(amountMode === "total" ? installmentAmount : totalAmount)}</p>
         </div>
       ) : null}
       <Select label="Status" {...form.register("status")}>
@@ -357,6 +381,7 @@ function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
 }
 
 function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (value: Feedback) => void }) {
+  const [amountMode, setAmountMode] = useState<"installment" | "total">("installment");
   const form = useForm<PurchaseInput, unknown, PurchaseForm>({
     resolver: zodResolver(purchaseSchema),
     defaultValues: { purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, is_recurring: false, recurring_status: "inactive", start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" },
@@ -369,9 +394,14 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
   const isRecurring = useWatch({ control: form.control, name: "is_recurring" });
   const watchedStartInstallment = useWatch({ control: form.control, name: "start_installment" });
   const watchedCardId = useWatch({ control: form.control, name: "card_id" });
-  const amount = toNumber(String(watchedAmount ?? ""));
+  const enteredAmount = toNumber(String(watchedAmount ?? ""));
   const count = Number(watchedCount ?? 1);
-  const total = useMemo(() => amount * (Number.isFinite(count) ? count : 1), [amount, count]);
+  const effectiveCount = isRecurring ? 12 : Number.isFinite(count) ? count : 1;
+  const total = useMemo(
+    () => amountMode === "total" ? enteredAmount : enteredAmount * effectiveCount,
+    [amountMode, effectiveCount, enteredAmount],
+  );
+  const previewInstallmentAmount = effectiveCount > 0 ? total / effectiveCount : 0;
   const selectedCard = cards.find((card) => card.id === watchedCardId);
   const invoicePreview = useMemo(() => {
     const isoDate = dateBrToIso(purchaseDateValue);
@@ -408,13 +438,14 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
       return;
     }
     try {
+      const effectiveInstallmentsCount = values.is_recurring && values.recurring_status === "active" ? 12 : values.installments_count;
       const normalizedValues = {
         description: values.description,
         card_id: values.card_id,
         purchase_date: values.purchase_date,
         category: values.category,
-        installment_amount: values.installment_amount,
-        installments_count: values.is_recurring && values.recurring_status === "active" ? 12 : values.installments_count,
+        installment_amount: amountMode === "total" ? values.installment_amount / effectiveInstallmentsCount : values.installment_amount,
+        installments_count: effectiveInstallmentsCount,
         start_installment: values.is_ongoing ? values.start_installment : 1,
         is_recurring: values.is_recurring,
         recurring_status: values.is_recurring ? values.recurring_status : "inactive",
@@ -426,6 +457,7 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
       const monthValue = `${firstInstallment.invoice_year}-${String(firstInstallment.invoice_month).padStart(2, "0")}`;
       const createdCount = result.installments.length;
       form.reset({ purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, is_recurring: false, recurring_status: "inactive", start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
+      setAmountMode("installment");
       onFeedback({
         tone: "success",
         title: "Compra no cartao registrada",
@@ -470,7 +502,29 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
           ) : null}
         </>
       ) : null}
-      <TextInput label="Valor da parcela" inputMode="decimal" placeholder="120,00" error={form.formState.errors.installment_amount?.message} {...form.register("installment_amount")} />
+      <div className="grid grid-cols-2 rounded-lg border border-gray-200 bg-white p-1">
+        <button
+          type="button"
+          onClick={() => setAmountMode("installment")}
+          className={`h-10 rounded-md text-sm font-bold ${amountMode === "installment" ? "bg-gray-950 text-white" : "text-gray-600"}`}
+        >
+          Por parcela
+        </button>
+        <button
+          type="button"
+          onClick={() => setAmountMode("total")}
+          className={`h-10 rounded-md text-sm font-bold ${amountMode === "total" ? "bg-gray-950 text-white" : "text-gray-600"}`}
+        >
+          Valor total
+        </button>
+      </div>
+      <TextInput
+        label={amountMode === "installment" ? "Valor da parcela" : "Valor total"}
+        inputMode="decimal"
+        placeholder={amountMode === "installment" ? "120,00" : "1200,00"}
+        error={form.formState.errors.installment_amount?.message}
+        {...form.register("installment_amount")}
+      />
       <TextInput
         label={isRecurring ? "Meses gerados" : "Quantidade de parcelas"}
         type="number"
@@ -487,8 +541,8 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
         <TextInput label="Parcela inicial no sistema" type="number" min="1" error={form.formState.errors.start_installment?.message} {...form.register("start_installment")} />
       ) : null}
       <div className="rounded-lg bg-gray-100 p-4">
-        <p className="text-sm text-gray-500">Total calculado</p>
-        <p className="text-xl font-bold">{formatCurrency(total)}</p>
+        <p className="text-sm text-gray-500">{amountMode === "installment" ? "Total calculado" : "Valor por parcela"}</p>
+        <p className="text-xl font-bold">{formatCurrency(amountMode === "installment" ? total : previewInstallmentAmount)}</p>
       </div>
       {invoicePreview ? (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">

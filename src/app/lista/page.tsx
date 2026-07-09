@@ -17,6 +17,7 @@ import {
   updateEntry,
   updateExpense,
   updatePayable,
+  updatePayableGroup,
   updateStatus,
 } from "@/features/finance/api";
 import { currentMonthRange, formatDateBr } from "@/lib/dates/format";
@@ -40,6 +41,11 @@ const isoToBr = (value: string) => {
 const brToIso = (value: string) => {
   const [day, month, year] = value.split("/");
   return `${year}-${month}-${day}`;
+};
+
+const parsedPreviewAmount = (value: string) => {
+  const parsed = Number(value.replace(/\./g, "").replace(",", "."));
+  return Number.isFinite(parsed) ? parsed : 0;
 };
 
 type ListItem =
@@ -71,6 +77,12 @@ type ListItem =
       status: PaymentStatus;
       category: ExpenseCategory;
       payable: Payable;
+      payables: Payable[];
+      paidInstallments: number;
+      totalInstallments: number;
+      firstDueDate: string;
+      nextDueDate: string | null;
+      lastDueDate: string;
     }
   | {
       id: string;
@@ -88,6 +100,7 @@ type ListItem =
     };
 
 type EditableRecord = Extract<ListItem, { type: "entry" }> | Extract<ListItem, { type: "expense" }> | Extract<ListItem, { type: "payable" }>;
+type SortMode = "date-desc" | "date-asc" | "due-asc" | "amount-desc" | "amount-asc" | "pending-first" | "category-asc" | "type-asc";
 
 const paymentMethodOptions: { value: PaymentMethod; label: string }[] = [
   { value: "pix", label: "Pix" },
@@ -97,15 +110,110 @@ const paymentMethodOptions: { value: PaymentMethod; label: string }[] = [
   { value: "other", label: "Outro" },
 ];
 
+const sortOptions: { value: SortMode; label: string }[] = [
+  { value: "date-desc", label: "Data mais recente" },
+  { value: "date-asc", label: "Data mais antiga" },
+  { value: "due-asc", label: "Vencimento mais proximo" },
+  { value: "amount-desc", label: "Valor maior" },
+  { value: "amount-asc", label: "Valor menor" },
+  { value: "pending-first", label: "Pendentes primeiro" },
+  { value: "category-asc", label: "Categoria A-Z" },
+  { value: "type-asc", label: "Tipo de registro" },
+];
+
+const pageSizeOptions = [10, 20, 50];
+
+function isInRange(value: string, start: string, end: string) {
+  return value >= start && value <= end;
+}
+
+function groupPayables(payables: Payable[], range: { start: string; end: string } | null) {
+  const groups = new Map<string, Payable[]>();
+  payables.forEach((payable) => {
+    const key = payable.payable_group_id || payable.id;
+    groups.set(key, [...(groups.get(key) ?? []), payable]);
+  });
+
+  return [...groups.entries()].flatMap(([groupId, groupItems]) => {
+    const sorted = groupItems.slice().sort((a, b) => a.installment_number - b.installment_number);
+    const matchesRange = !range || sorted.some((item) => isInRange(item.purchase_date, range.start, range.end) || isInRange(item.due_date, range.start, range.end));
+    if (!matchesRange) return [];
+
+    const representative = sorted.find((item) => item.status === "pending") ?? sorted[0];
+    const paidInstallments = sorted.filter((item) => item.status === "paid").length;
+    const totalInstallments = Math.max(...sorted.map((item) => item.installments_count || sorted.length), sorted.length);
+    const nextDueDate = sorted
+      .filter((item) => item.status !== "paid")
+      .sort((a, b) => a.due_date.localeCompare(b.due_date))[0]?.due_date ?? null;
+    const firstDueDate = sorted.slice().sort((a, b) => a.due_date.localeCompare(b.due_date))[0]?.due_date ?? representative.due_date;
+    const lastDueDate = sorted.slice().sort((a, b) => b.due_date.localeCompare(a.due_date))[0]?.due_date ?? representative.due_date;
+    const amount = sorted.reduce((sum, item) => sum + Number(item.amount), 0);
+
+    return [{
+      id: groupId,
+      type: "payable" as const,
+      title: representative.description,
+      amount,
+      date: nextDueDate ?? lastDueDate,
+      purchaseDate: representative.purchase_date,
+      status: paidInstallments >= sorted.length ? "paid" as PaymentStatus : "pending" as PaymentStatus,
+      category: representative.category,
+      payable: representative,
+      payables: sorted,
+      paidInstallments,
+      totalInstallments,
+      firstDueDate,
+      nextDueDate,
+      lastDueDate,
+    }];
+  });
+}
+
+function statusRank(item: ListItem) {
+  if (item.type === "entry") return 2;
+  if (item.type === "purchase") return item.purchase.paid_installments >= item.purchase.active_installments ? 1 : 0;
+  return item.status === "paid" ? 1 : 0;
+}
+
+function itemDate(item: ListItem) {
+  return item.date;
+}
+
+function itemDueDate(item: ListItem) {
+  if (item.type === "entry") return item.date;
+  if (item.type === "purchase") return item.purchase.next_due_date ?? item.date;
+  if (item.type === "payable") return item.nextDueDate ?? item.lastDueDate;
+  return item.date;
+}
+
+function itemCategory(item: ListItem) {
+  return item.type === "entry" ? "" : getCategoryLabel(item.category);
+}
+
+function compareListItems(a: ListItem, b: ListItem, sortMode: SortMode) {
+  if (sortMode === "date-asc") return itemDate(a).localeCompare(itemDate(b));
+  if (sortMode === "due-asc") return itemDueDate(a).localeCompare(itemDueDate(b));
+  if (sortMode === "amount-desc") return b.amount - a.amount;
+  if (sortMode === "amount-asc") return a.amount - b.amount;
+  if (sortMode === "pending-first") return statusRank(a) - statusRank(b) || itemDueDate(a).localeCompare(itemDueDate(b));
+  if (sortMode === "category-asc") return itemCategory(a).localeCompare(itemCategory(b)) || itemDate(b).localeCompare(itemDate(a));
+  if (sortMode === "type-asc") return labelType(a.type).localeCompare(labelType(b.type)) || itemDate(b).localeCompare(itemDate(a));
+  return itemDate(b).localeCompare(itemDate(a));
+}
+
 export default function ListaPage() {
   const initialRange = currentMonthRange();
   const [startDate, setStartDate] = useState(initialRange.start);
   const [endDate, setEndDate] = useState(initialRange.end);
+  const [periodMode, setPeriodMode] = useState<"none" | "range">("none");
   const [viewMode, setViewMode] = useState("purchases");
   const [type, setType] = useState("all");
   const [status, setStatus] = useState("all");
   const [card, setCard] = useState("all");
   const [category, setCategory] = useState("all");
+  const [sortMode, setSortMode] = useState<SortMode>("date-desc");
+  const [pageSize, setPageSize] = useState(20);
+  const [page, setPage] = useState(1);
   const [items, setItems] = useState<ListItem[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
   const [error, setError] = useState("");
@@ -117,7 +225,8 @@ export default function ListaPage() {
     if (!hasSupabaseConfig()) return;
     setError("");
     try {
-      const data = await fetchListData(createClient(), { start: startDate, end: endDate });
+      const activeRange = periodMode === "range" ? { start: startDate, end: endDate } : undefined;
+      const data = await fetchListData(createClient(), activeRange);
       setCards(data.cards);
       setItems([
         ...data.entries.map((item) => ({
@@ -138,17 +247,7 @@ export default function ListaPage() {
           category: item.category,
           expense: item,
         })),
-        ...data.payables.map((item: Payable) => ({
-          id: item.id,
-          type: "payable" as const,
-          title: `${item.description}${item.installments_count > 1 ? ` ${item.installment_number}/${item.installments_count}` : ""}`,
-          amount: Number(item.amount),
-          date: item.due_date,
-          purchaseDate: item.purchase_date,
-          status: item.status,
-          category: item.category,
-          payable: item,
-        })),
+        ...groupPayables(data.payables, activeRange ?? null),
         ...data.purchases.map((item) => ({
           id: item.id,
           type: "purchase" as const,
@@ -167,7 +266,7 @@ export default function ListaPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao carregar lista.");
     }
-  }, [endDate, startDate]);
+  }, [endDate, periodMode, startDate]);
 
   useEffect(() => {
     load();
@@ -176,8 +275,8 @@ export default function ListaPage() {
   const filtered = useMemo(() => {
     return items.filter((item) => {
       if (type !== "all" && item.type !== type) return false;
-      if (item.type === "purchase" && viewMode === "purchases" && item.date < startDate && !item.hasInvoiceInRange) return false;
-      if (item.type === "purchase" && viewMode === "purchases" && item.date > endDate && !item.hasInvoiceInRange) return false;
+      if (item.type === "purchase" && periodMode === "range" && viewMode === "purchases" && item.date < startDate && !item.hasInvoiceInRange) return false;
+      if (item.type === "purchase" && periodMode === "range" && viewMode === "purchases" && item.date > endDate && !item.hasInvoiceInRange) return false;
       if (item.type === "purchase" && viewMode === "open-invoices" && !item.hasOpenInvoiceInRange) return false;
       if (item.type === "purchase" && viewMode === "invoice-range" && !item.hasInvoiceInRange) return false;
       if (item.type !== "purchase" && viewMode !== "purchases") return false;
@@ -190,7 +289,24 @@ export default function ListaPage() {
       if (category !== "all" && item.type !== "entry" && item.category !== category) return false;
       return true;
     });
-  }, [items, type, status, card, category, viewMode, startDate, endDate]);
+  }, [items, type, periodMode, status, card, category, viewMode, startDate, endDate]);
+
+  const sorted = useMemo(() => {
+    return filtered.slice().sort((a, b) => compareListItems(a, b, sortMode));
+  }, [filtered, sortMode]);
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const paginated = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return sorted.slice(start, start + pageSize);
+  }, [pageSize, safePage, sorted]);
+  const pageStart = sorted.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const pageEnd = Math.min(safePage * pageSize, sorted.length);
+
+  useEffect(() => {
+    setPage(1);
+  }, [periodMode, startDate, endDate, type, status, card, category, viewMode, sortMode, pageSize]);
 
   async function toggleExpense(item: Extract<ListItem, { type: "expense" }>) {
     await updateStatus(createClient(), "expenses", item.id, item.status === "paid" ? "pending" : "paid");
@@ -198,7 +314,8 @@ export default function ListaPage() {
   }
 
   async function togglePayable(item: Extract<ListItem, { type: "payable" }>) {
-    await updateStatus(createClient(), "payables", item.id, item.status === "paid" ? "pending" : "paid");
+    const nextStatus = item.status === "paid" ? "pending" : "paid";
+    await Promise.all(item.payables.map((payable) => updateStatus(createClient(), "payables", payable.id, nextStatus)));
     await load();
   }
 
@@ -217,7 +334,7 @@ export default function ListaPage() {
   }
 
   async function deleteRecord(item: EditableRecord) {
-    const confirmed = window.confirm(`Excluir "${item.title}"?`);
+    const confirmed = window.confirm(item.type === "payable" && item.payables.length > 1 ? `Excluir todas as parcelas de "${item.title}"?` : `Excluir "${item.title}"?`);
     if (!confirmed) return;
     setError("");
     setFeedback("");
@@ -229,8 +346,8 @@ export default function ListaPage() {
         await deleteExpense(createClient(), item.id);
         setFeedback("Gasto excluido.");
       } else {
-        await deletePayable(createClient(), item.id);
-        setFeedback("Conta a pagar excluida.");
+        await Promise.all(item.payables.map((payable) => deletePayable(createClient(), payable.id)));
+        setFeedback(item.payables.length > 1 ? "Conta parcelada excluida." : "Conta a pagar excluida.");
       }
       await load();
     } catch (err) {
@@ -246,13 +363,20 @@ export default function ListaPage() {
         {feedback ? <p className="mb-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-700">{feedback}</p> : null}
         <div className="mb-5 grid gap-2 rounded-lg border border-gray-200 bg-white p-3 md:grid-cols-4">
           <label className="block">
+            <span className="mb-1 block text-xs font-semibold text-gray-500">Prazo</span>
+            <select value={periodMode} onChange={(event) => setPeriodMode(event.target.value as "none" | "range")} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm">
+              <option value="none">Sem prazo</option>
+              <option value="range">Filtrar por periodo</option>
+            </select>
+          </label>
+          {periodMode === "range" ? <label className="block">
             <span className="mb-1 block text-xs font-semibold text-gray-500">Inicio</span>
             <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} className="h-11 w-full rounded-lg border border-gray-300 px-3 text-sm font-semibold" />
-          </label>
-          <label className="block">
+          </label> : null}
+          {periodMode === "range" ? <label className="block">
             <span className="mb-1 block text-xs font-semibold text-gray-500">Fim</span>
             <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} className="h-11 w-full rounded-lg border border-gray-300 px-3 text-sm font-semibold" />
-          </label>
+          </label> : null}
           <label className="block">
             <span className="mb-1 block text-xs font-semibold text-gray-500">Visualizacao</span>
             <select value={viewMode} onChange={(event) => setViewMode(event.target.value)} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm">
@@ -293,13 +417,38 @@ export default function ListaPage() {
             {expenseCategories.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
           </select>
           </label>
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold text-gray-500">Ordenar por</span>
+            <select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm">
+              {sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-xs font-semibold text-gray-500">Itens por pagina</span>
+            <select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm">
+              {pageSizeOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </label>
         </div>
 
-        {filtered.length === 0 ? (
+        {sorted.length === 0 ? (
           <EmptyState title="Nenhum registro encontrado." actionLabel="Registrar" href="/registrar" />
         ) : (
+          <>
+          <div className="mb-3 flex flex-col gap-2 rounded-lg border border-gray-200 bg-white p-3 text-sm text-gray-600 sm:flex-row sm:items-center sm:justify-between">
+            <span>Mostrando {pageStart}-{pageEnd} de {sorted.length}</span>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={safePage <= 1} className="rounded-lg border border-gray-200 px-3 py-2 font-bold text-gray-700 disabled:opacity-50">
+                Anterior
+              </button>
+              <span className="font-semibold text-gray-900">{safePage}/{totalPages}</span>
+              <button type="button" onClick={() => setPage((value) => Math.min(totalPages, value + 1))} disabled={safePage >= totalPages} className="rounded-lg border border-gray-200 px-3 py-2 font-bold text-gray-700 disabled:opacity-50">
+                Proxima
+              </button>
+            </div>
+          </div>
           <div className="space-y-3">
-            {filtered.map((item) => {
+            {paginated.map((item) => {
               if (item.type === "purchase") {
                 return <PurchaseRow key={`purchase-${item.id}`} item={item} onEdit={() => setEditing(item)} onCancel={() => cancelPurchase(item)} />;
               }
@@ -319,6 +468,7 @@ export default function ListaPage() {
                     <p className="text-sm text-gray-500">
                       {labelType(item.type)}
                       {item.type === "expense" || item.type === "payable" ? ` - ${getCategoryLabel(item.category)}` : ""}
+                      {item.type === "payable" && item.totalInstallments > 1 ? ` - ${item.paidInstallments}/${item.totalInstallments} parcelas pagas` : ""}
                       {" - "}
                       {formatDateBr(item.date)}
                       {item.type === "payable" ? ` - compra em ${formatDateBr(item.purchaseDate)}` : ""}
@@ -340,6 +490,7 @@ export default function ListaPage() {
               );
             })}
           </div>
+          </>
         )}
         {editing ? (
           <EditPurchaseDialog
@@ -424,6 +575,7 @@ function EditPurchaseDialog({
   const [cardId, setCardId] = useState(purchase.card_id);
   const [purchaseDate, setPurchaseDate] = useState(isoToBr(purchase.purchase_date));
   const [category, setCategory] = useState<ExpenseCategory>(purchase.category);
+  const [amountMode, setAmountMode] = useState<"installment" | "total">("installment");
   const [installmentAmount, setInstallmentAmount] = useState(String(purchase.installment_amount).replace(".", ","));
   const [installmentsCount, setInstallmentsCount] = useState(String(purchase.installments_count));
   const [startInstallment, setStartInstallment] = useState(String(purchase.start_installment));
@@ -447,13 +599,15 @@ function EditPurchaseDialog({
     setSaving(true);
     onError("");
     try {
+      const effectiveInstallmentsCount = category === "subscriptions" && isRecurring && recurringStatus === "active" ? 12 : Number(installmentsCount);
+      const parsedAmount = Number(installmentAmount.replace(/\./g, "").replace(",", "."));
       await updateCardPurchase(createClient(), purchase.id, {
         card,
         description,
         purchase_date: brToIso(purchaseDate),
         category,
-        installment_amount: Number(installmentAmount.replace(/\./g, "").replace(",", ".")),
-        installments_count: category === "subscriptions" && isRecurring && recurringStatus === "active" ? 12 : Number(installmentsCount),
+        installment_amount: amountMode === "total" ? parsedAmount / effectiveInstallmentsCount : parsedAmount,
+        installments_count: effectiveInstallmentsCount,
         start_installment: Number(startInstallment),
         is_recurring: category === "subscriptions" && isRecurring,
         recurring_status: category === "subscriptions" && isRecurring ? recurringStatus : "inactive",
@@ -528,11 +682,29 @@ function EditPurchaseDialog({
               ) : null}
             </>
           ) : null}
-          <EditField label="Valor da parcela" value={installmentAmount} onChange={setInstallmentAmount} inputMode="decimal" />
+          <div className="grid grid-cols-2 rounded-lg border border-gray-200 bg-white p-1">
+            <button type="button" onClick={() => setAmountMode("installment")} className={`h-10 rounded-md text-sm font-bold ${amountMode === "installment" ? "bg-gray-950 text-white" : "text-gray-600"}`}>
+              Por parcela
+            </button>
+            <button type="button" onClick={() => setAmountMode("total")} className={`h-10 rounded-md text-sm font-bold ${amountMode === "total" ? "bg-gray-950 text-white" : "text-gray-600"}`}>
+              Valor total
+            </button>
+          </div>
+          <EditField label={amountMode === "installment" ? "Valor da parcela" : "Valor total"} value={installmentAmount} onChange={setInstallmentAmount} inputMode="decimal" />
           <div className="grid grid-cols-2 gap-3">
             <EditField label="Parcelas" value={installmentsCount} onChange={setInstallmentsCount} type="number" />
             <EditField label="Parcela inicial" value={startInstallment} onChange={setStartInstallment} type="number" />
           </div>
+          {parsedPreviewAmount(installmentAmount) > 0 ? (
+            <div className="rounded-lg bg-gray-100 p-4">
+              <p className="text-sm text-gray-500">{amountMode === "installment" ? "Total calculado" : "Valor por parcela"}</p>
+              <p className="text-xl font-bold">
+                {formatCurrency(amountMode === "installment"
+                  ? parsedPreviewAmount(installmentAmount) * Math.max(1, Number(installmentsCount) || 1)
+                  : parsedPreviewAmount(installmentAmount) / Math.max(1, Number(installmentsCount) || 1))}
+              </p>
+            </div>
+          ) : null}
           <label className="block">
             <span className="mb-1 block text-sm font-medium text-gray-700">Observacao</span>
             <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} className="w-full rounded-lg border border-gray-300 px-3 py-2" />
@@ -559,8 +731,9 @@ function EditRecordDialog({
 }) {
   const [description, setDescription] = useState(item.title.replace(/\s\d+\/\d+$/, ""));
   const [amount, setAmount] = useState(String(item.amount).replace(".", ","));
-  const [date, setDate] = useState(isoToBr(item.date));
+  const [date, setDate] = useState(isoToBr(item.type === "payable" ? item.firstDueDate : item.date));
   const [purchaseDate, setPurchaseDate] = useState(item.type === "payable" ? isoToBr(item.purchaseDate) : "");
+  const [installmentsCount, setInstallmentsCount] = useState(item.type === "payable" ? String(item.totalInstallments) : "1");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(item.type === "expense" ? item.expense.payment_method : "pix");
   const [category, setCategory] = useState<ExpenseCategory>(item.type === "entry" ? "other" : item.category);
   const [status, setStatus] = useState<PaymentStatus>(item.type === "entry" ? "paid" : item.status);
@@ -588,6 +761,12 @@ function EditRecordDialog({
       return;
     }
 
+    const parsedInstallments = Number(installmentsCount);
+    if (item.type === "payable" && (!Number.isInteger(parsedInstallments) || parsedInstallments < 1)) {
+      onError("Informe uma quantidade de parcelas valida.");
+      return;
+    }
+
     setSaving(true);
     try {
       if (item.type === "entry") {
@@ -607,8 +786,19 @@ function EditRecordDialog({
           status,
           notes: notes.trim() || null,
         });
+      } else if (item.payables.length > 1 || parsedInstallments > 1) {
+        await updatePayableGroup(createClient(), item.payable.payable_group_id, {
+          description: description.trim(),
+          amount: parsedAmount,
+          purchase_date: brToIso(purchaseDate),
+          due_date: brToIso(date),
+          category,
+          status,
+          installments_count: parsedInstallments,
+          notes: notes.trim() || null,
+        });
       } else {
-        await updatePayable(createClient(), item.id, {
+        await updatePayable(createClient(), item.payable.id, {
           description: description.trim(),
           amount: parsedAmount,
           purchase_date: brToIso(purchaseDate),
@@ -637,11 +827,27 @@ function EditRecordDialog({
         </div>
         <div className="space-y-3">
           <EditField label="Descricao" value={description} onChange={setDescription} />
-          <EditField label="Valor" value={amount} onChange={setAmount} inputMode="decimal" />
+          <EditField label={item.type === "payable" ? "Valor total" : "Valor"} value={amount} onChange={setAmount} inputMode="decimal" />
           {item.type === "payable" ? (
             <EditField label="Data da compra" value={purchaseDate} onChange={(value) => setPurchaseDate(maskDateBr(value))} inputMode="numeric" />
           ) : null}
-          <EditField label={item.type === "entry" ? "Data" : "Vencimento"} value={date} onChange={(value) => setDate(maskDateBr(value))} inputMode="numeric" />
+          <EditField label={item.type === "entry" ? "Data" : item.type === "payable" ? "Vencimento da primeira parcela" : "Vencimento"} value={date} onChange={(value) => setDate(maskDateBr(value))} inputMode="numeric" />
+          {item.type === "payable" ? (
+            <>
+              <EditField label="Quantidade de parcelas" value={installmentsCount} onChange={setInstallmentsCount} type="number" />
+              {Number(installmentsCount) > 1 ? (
+                <div className="rounded-lg bg-gray-100 p-4">
+                  <p className="text-sm text-gray-500">Valor aproximado da parcela</p>
+                  <p className="text-xl font-bold">{formatCurrency(parsedPreviewAmount(amount) / Math.max(1, Number(installmentsCount) || 1))}</p>
+                </div>
+              ) : null}
+              {item.paidInstallments > 0 ? (
+                <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+                  Esta conta tem parcela paga. Para alterar quantidade, valor ou vencimentos das parcelas, reabra/remova a baixa primeiro.
+                </p>
+              ) : null}
+            </>
+          ) : null}
           {item.type === "expense" ? (
             <label className="block">
               <span className="mb-1 block text-sm font-medium text-gray-700">Forma de pagamento</span>

@@ -60,6 +60,7 @@ export default function CompraDetalhePage() {
   const [purchase, setPurchase] = useState<CardPurchaseDetails | null>(null);
   const [cards, setCards] = useState<Card[]>([]);
   const [form, setForm] = useState<PurchaseForm | null>(null);
+  const [amountMode, setAmountMode] = useState<"installment" | "total">("installment");
   const [editing, setEditing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -108,6 +109,7 @@ export default function CompraDetalhePage() {
       recurringStatus: purchase.recurring_status,
       notes: purchase.notes ?? "",
     });
+    setAmountMode("installment");
     setFeedback("");
     setError("");
     setEditing(true);
@@ -118,9 +120,10 @@ export default function CompraDetalhePage() {
     if (!purchase || !form) return;
 
     const card = cards.find((candidate) => candidate.id === form.cardId);
-    const installmentAmount = parseMoney(form.installmentAmount);
+    const enteredAmount = parseMoney(form.installmentAmount);
     const installmentsCount = Number(form.installmentsCount);
     const startInstallment = Number(form.startInstallment);
+    const installmentAmount = amountMode === "total" ? enteredAmount / installmentsCount : enteredAmount;
 
     if (!card) {
       setError("Escolha um cartao valido.");
@@ -134,8 +137,8 @@ export default function CompraDetalhePage() {
       setError("Informe a data no formato dd/mm/aaaa.");
       return;
     }
-    if (!Number.isFinite(installmentAmount) || installmentAmount <= 0) {
-      setError("Informe um valor de parcela valido.");
+    if (!Number.isFinite(enteredAmount) || enteredAmount <= 0) {
+      setError(amountMode === "total" ? "Informe um valor total valido." : "Informe um valor de parcela valido.");
       return;
     }
     if (!Number.isInteger(installmentsCount) || installmentsCount < 1 || !Number.isInteger(startInstallment) || startInstallment < 1 || startInstallment > installmentsCount) {
@@ -303,11 +306,29 @@ export default function CompraDetalhePage() {
                       ) : null}
                     </>
                   ) : null}
-                  <EditField label="Valor da parcela" value={form.installmentAmount} onChange={(value) => setForm({ ...form, installmentAmount: value })} inputMode="decimal" />
+                  <div className="grid grid-cols-2 rounded-lg border border-gray-200 bg-white p-1 md:col-span-2">
+                    <button type="button" onClick={() => setAmountMode("installment")} className={`h-10 rounded-md text-sm font-bold ${amountMode === "installment" ? "bg-gray-950 text-white" : "text-gray-600"}`}>
+                      Por parcela
+                    </button>
+                    <button type="button" onClick={() => setAmountMode("total")} className={`h-10 rounded-md text-sm font-bold ${amountMode === "total" ? "bg-gray-950 text-white" : "text-gray-600"}`}>
+                      Valor total
+                    </button>
+                  </div>
+                  <EditField label={amountMode === "installment" ? "Valor da parcela" : "Valor total"} value={form.installmentAmount} onChange={(value) => setForm({ ...form, installmentAmount: value })} inputMode="decimal" />
                   <div className="grid grid-cols-2 gap-3">
                     <EditField label="Parcelas" value={form.installmentsCount} onChange={(value) => setForm({ ...form, installmentsCount: value })} type="number" />
                     <EditField label="Parcela inicial" value={form.startInstallment} onChange={(value) => setForm({ ...form, startInstallment: value })} type="number" />
                   </div>
+                  {parseMoney(form.installmentAmount) > 0 ? (
+                    <div className="rounded-lg bg-gray-100 p-4 md:col-span-2">
+                      <p className="text-sm text-gray-500">{amountMode === "installment" ? "Total calculado" : "Valor por parcela"}</p>
+                      <p className="text-xl font-bold">
+                        {formatCurrency(amountMode === "installment"
+                          ? parseMoney(form.installmentAmount) * Math.max(1, Number(form.installmentsCount) || 1)
+                          : parseMoney(form.installmentAmount) / Math.max(1, Number(form.installmentsCount) || 1))}
+                      </p>
+                    </div>
+                  ) : null}
                   <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium text-gray-700">Observacao</span>
                     <textarea value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} rows={3} className="w-full rounded-lg border border-gray-300 px-3 py-2" />
