@@ -24,7 +24,7 @@ import { currentMonthRange, formatDateBr } from "@/lib/dates/format";
 import { expenseCategories, getCategoryLabel } from "@/lib/finance/categories";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import type { Card, CardPurchaseWithProgress, Entry, Expense, ExpenseCategory, Payable, PaymentMethod, PaymentStatus } from "@/types/finance";
+import type { Card, CardPurchaseWithProgress, CashAccount, EntryWithCashAccount, Expense, ExpenseCategory, Payable, PaymentMethod, PaymentStatus } from "@/types/finance";
 
 const maskDateBr = (value: string) => {
   const digits = value.replace(/\D/g, "").slice(0, 8);
@@ -55,7 +55,7 @@ type ListItem =
       title: string;
       amount: number;
       date: string;
-      entry: Entry;
+      entry: EntryWithCashAccount;
     }
   | {
       id: string;
@@ -260,6 +260,7 @@ export default function ListaPage() {
   const [page, setPage] = useState(1);
   const [items, setItems] = useState<ListItem[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
+  const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [editing, setEditing] = useState<Extract<ListItem, { type: "purchase" }> | null>(null);
@@ -272,6 +273,7 @@ export default function ListaPage() {
       const activeRange = periodMode === "range" ? { start: startDate, end: endDate } : undefined;
       const data = await fetchListData(createClient(), activeRange);
       setCards(data.cards);
+      setCashAccounts(data.cashAccounts);
       setItems([
         ...data.entries.map((item) => ({
           id: item.id,
@@ -529,6 +531,11 @@ export default function ListaPage() {
                       {formatDateBr(item.date)}
                       {item.type === "payable" ? ` - compra em ${formatDateBr(item.purchaseDate)}` : ""}
                     </p>
+                    {item.type === "entry" ? (
+                      <p className={`mt-1 text-xs ${item.entry.cash_transactions?.cash_accounts ? "text-emerald-700" : "text-amber-700"}`}>
+                        {item.entry.cash_transactions?.cash_accounts?.name ?? "Entrada ainda nao vinculada ao caixa"}
+                      </p>
+                    ) : null}
                     {item.type === "payable" && item.totalInstallments > 1 && item.lastPaidText ? <p className="mt-1 text-xs text-emerald-700">Ultima paga: {item.lastPaidText}</p> : null}
                     {item.type === "payable" && item.totalInstallments > 1 && item.nextDueText ? <p className="mt-1 text-xs text-amber-700">Proxima a pagar: {item.nextDueText}</p> : null}
                   </div>
@@ -566,6 +573,7 @@ export default function ListaPage() {
         {editingRecord ? (
           <EditRecordDialog
             item={editingRecord}
+            cashAccounts={cashAccounts}
             onClose={() => setEditingRecord(null)}
             onSaved={async () => {
               setEditingRecord(null);
@@ -780,11 +788,13 @@ function EditPurchaseDialog({
 
 function EditRecordDialog({
   item,
+  cashAccounts,
   onClose,
   onSaved,
   onError,
 }: {
   item: EditableRecord;
+  cashAccounts: CashAccount[];
   onClose: () => void;
   onSaved: () => void | Promise<void>;
   onError: (value: string) => void;
@@ -797,6 +807,9 @@ function EditRecordDialog({
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(item.type === "expense" ? item.expense.payment_method : "pix");
   const [category, setCategory] = useState<ExpenseCategory>(item.type === "entry" ? "other" : item.category);
   const [status, setStatus] = useState<PaymentStatus>(item.type === "entry" ? "paid" : item.status);
+  const [cashAccountId, setCashAccountId] = useState(
+    item.type === "entry" ? item.entry.cash_transactions?.account_id ?? "" : "",
+  );
   const [notes, setNotes] = useState(
     item.type === "entry" ? item.entry.notes ?? "" : item.type === "expense" ? item.expense.notes ?? "" : item.payable.notes ?? "",
   );
@@ -808,6 +821,10 @@ function EditRecordDialog({
 
     if (!description.trim()) {
       onError("Informe uma descricao.");
+      return;
+    }
+    if (item.type === "entry" && !cashAccountId) {
+      onError("Escolha a conta de destino da entrada.");
       return;
     }
     if (!/^\d{2}\/\d{2}\/\d{4}$/.test(date) || (item.type === "payable" && !/^\d{2}\/\d{2}\/\d{4}$/.test(purchaseDate))) {
@@ -834,6 +851,7 @@ function EditRecordDialog({
           description: description.trim(),
           amount: parsedAmount,
           date: brToIso(date),
+          cash_account_id: cashAccountId,
           notes: notes.trim() || null,
         });
       } else if (item.type === "expense") {
@@ -892,6 +910,20 @@ function EditRecordDialog({
             <EditField label="Data da compra" value={purchaseDate} onChange={(value) => setPurchaseDate(maskDateBr(value))} inputMode="numeric" />
           ) : null}
           <EditField label={item.type === "entry" ? "Data" : item.type === "payable" ? "Vencimento da primeira parcela" : "Vencimento"} value={date} onChange={(value) => setDate(maskDateBr(value))} inputMode="numeric" />
+          {item.type === "entry" ? (
+            <label className="block">
+              <span className="mb-1 block text-sm font-medium text-gray-700">Conta de destino</span>
+              <select value={cashAccountId} onChange={(event) => setCashAccountId(event.target.value)} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3">
+                <option value="">Escolha uma conta</option>
+                {cashAccounts.filter((account) => account.is_active).map((account) => (
+                  <option key={account.id} value={account.id}>{account.name}</option>
+                ))}
+              </select>
+              {cashAccounts.every((account) => !account.is_active) ? (
+                <a href="/caixa" className="mt-2 inline-block text-sm font-bold text-gray-900 underline">Criar conta no Caixa</a>
+              ) : null}
+            </label>
+          ) : null}
           {item.type === "payable" ? (
             <>
               <EditField label="Quantidade de parcelas" value={installmentsCount} onChange={setInstallmentsCount} type="number" />

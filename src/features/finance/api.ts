@@ -12,6 +12,7 @@ import type {
   CashAccountWithBalance,
   CashTransaction,
   Entry,
+  EntryWithCashAccount,
   Expense,
   Payable,
   PaymentStatus,
@@ -235,11 +236,15 @@ export async function fetchListData(
   supabase: SupabaseClient,
   range?: { start: string; end: string },
 ) {
-  const entriesQuery = supabase.from("entries").select("*").order("date", { ascending: false });
+  const entriesQuery = supabase
+    .from("entries")
+    .select("*, cash_transactions(account_id, cash_accounts(id, name, color))")
+    .order("date", { ascending: false });
   const expensesQuery = supabase.from("expenses").select("*").order("due_date", { ascending: false });
 
-  const [cards, entries, expenses, payables, purchases] = await Promise.all([
+  const [cards, cashAccounts, entries, expenses, payables, purchases] = await Promise.all([
     supabase.from("cards").select("*").order("name"),
+    supabase.from("cash_accounts").select("*").order("is_active", { ascending: false }).order("name"),
     range ? entriesQuery.gte("date", range.start).lte("date", range.end) : entriesQuery,
     range ? expensesQuery.gte("due_date", range.start).lte("due_date", range.end) : expensesQuery,
     supabase.from("payables").select("*").order("due_date", { ascending: false }),
@@ -250,7 +255,7 @@ export async function fetchListData(
     .order("purchase_date", { ascending: false }),
   ]);
 
-  const error = cards.error ?? entries.error ?? expenses.error ?? payables.error ?? purchases.error;
+  const error = cards.error ?? cashAccounts.error ?? entries.error ?? expenses.error ?? payables.error ?? purchases.error;
   if (error) throw error;
 
   const activePurchases = (purchases.data ?? []).map((purchase) => {
@@ -281,7 +286,8 @@ export async function fetchListData(
 
   return {
     cards: (cards.data ?? []) as Card[],
-    entries: (entries.data ?? []) as Entry[],
+    cashAccounts: (cashAccounts.data ?? []) as CashAccount[],
+    entries: (entries.data ?? []) as EntryWithCashAccount[],
     expenses: (expenses.data ?? []) as Expense[],
     payables: (payables.data ?? []) as Payable[],
     purchases: activePurchases,
@@ -333,27 +339,36 @@ export async function saveCard(
 
 export async function createEntry(
   supabase: SupabaseClient,
-  values: Pick<Entry, "description" | "amount" | "date" | "notes">,
+  values: Pick<Entry, "description" | "amount" | "date" | "notes"> & { cash_account_id: string },
 ) {
-  const user_id = await currentUserId(supabase);
-  const { error } = await supabase.from("entries").insert({ ...values, user_id });
+  const { error } = await supabase.rpc("create_entry_with_cash", {
+    p_description: values.description,
+    p_amount: values.amount,
+    p_date: values.date,
+    p_notes: values.notes,
+    p_cash_account_id: values.cash_account_id,
+  });
   if (error) throw error;
 }
 
 export async function updateEntry(
   supabase: SupabaseClient,
   id: string,
-  values: Pick<Entry, "description" | "amount" | "date" | "notes">,
+  values: Pick<Entry, "description" | "amount" | "date" | "notes"> & { cash_account_id: string },
 ) {
-  const { error } = await supabase
-    .from("entries")
-    .update({ ...values, updated_at: new Date().toISOString() })
-    .eq("id", id);
+  const { error } = await supabase.rpc("update_entry_with_cash", {
+    p_entry_id: id,
+    p_description: values.description,
+    p_amount: values.amount,
+    p_date: values.date,
+    p_notes: values.notes,
+    p_cash_account_id: values.cash_account_id,
+  });
   if (error) throw error;
 }
 
 export async function deleteEntry(supabase: SupabaseClient, id: string) {
-  const { error } = await supabase.from("entries").delete().eq("id", id);
+  const { error } = await supabase.rpc("delete_entry_with_cash", { p_entry_id: id });
   if (error) throw error;
 }
 

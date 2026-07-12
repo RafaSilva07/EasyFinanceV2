@@ -35,9 +35,17 @@ export type Entry = {
   description: string;
   amount: number;
   date: string;
+  cash_transaction_id: string | null;
   notes: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type EntryWithCashAccount = Entry & {
+  cash_transactions?: {
+    account_id: string;
+    cash_accounts?: Pick<CashAccount, "id" | "name" | "color"> | null;
+  } | null;
 };
 
 export type Expense = {

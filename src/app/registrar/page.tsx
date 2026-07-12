@@ -9,13 +9,13 @@ import { Banknote, CheckCircle2, CreditCard, Receipt, ScrollText, XCircle } from
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
-import { createCardPurchase, createEntry, createExpense, createPayable, fetchCards } from "@/features/finance/api";
+import { createCardPurchase, createEntry, createExpense, createPayable, fetchCards, fetchCashAccounts } from "@/features/finance/api";
 import { expenseCategories } from "@/lib/finance/categories";
 import { formatDateBr, monthLabel } from "@/lib/dates/format";
 import { getInvoiceDueDate, toIsoDate } from "@/lib/dates/invoice";
 import { formatCurrency, toNumber } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import type { Card } from "@/types/finance";
+import type { Card, CashAccountWithBalance } from "@/types/finance";
 
 const today = () => {
   const now = new Date();
@@ -66,6 +66,7 @@ const entrySchema = z.object({
   description: z.string().min(1, "Informe a descricao"),
   amount: money,
   date: dateBr,
+  cash_account_id: z.string().min(1, "Escolha a conta de destino"),
   notes: optionalText,
 });
 
@@ -127,15 +128,21 @@ type Feedback = {
 export default function RegistrarPage() {
   const [mode, setMode] = useState<Mode>("expense");
   const [cards, setCards] = useState<Card[]>([]);
+  const [cashAccounts, setCashAccounts] = useState<CashAccountWithBalance[]>([]);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
 
-  async function loadCards() {
+  async function loadOptions() {
     if (!hasSupabaseConfig()) return;
-    setCards((await fetchCards(createClient())).filter((card) => card.is_active));
+    const [nextCards, nextCashAccounts] = await Promise.all([
+      fetchCards(createClient()),
+      fetchCashAccounts(createClient()),
+    ]);
+    setCards(nextCards.filter((card) => card.is_active));
+    setCashAccounts(nextCashAccounts.filter((account) => account.is_active));
   }
 
   useEffect(() => {
-    loadCards();
+    loadOptions();
   }, []);
 
   useEffect(() => {
@@ -154,7 +161,7 @@ export default function RegistrarPage() {
           <ModeButton active={mode === "purchase"} label="Cartao" icon={<CreditCard size={19} />} onClick={() => setMode("purchase")} />
         </div>
         {feedback ? <ActionFeedback feedback={feedback} onClose={() => setFeedback(null)} /> : null}
-        {mode === "entry" ? <EntryFormView onFeedback={setFeedback} /> : null}
+        {mode === "entry" ? <EntryFormView cashAccounts={cashAccounts} onFeedback={setFeedback} /> : null}
         {mode === "expense" ? <ExpenseFormView onFeedback={setFeedback} /> : null}
         {mode === "payable" ? <PayableFormView onFeedback={setFeedback} /> : null}
         {mode === "purchase" ? <PurchaseFormView cards={cards} onFeedback={setFeedback} /> : null}
@@ -202,32 +209,47 @@ function ModeButton({ active, label, icon, onClick }: { active: boolean; label: 
   );
 }
 
-function EntryFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
+function EntryFormView({ cashAccounts, onFeedback }: { cashAccounts: CashAccountWithBalance[]; onFeedback: (value: Feedback) => void }) {
   const form = useForm<EntryInput, unknown, EntryForm>({
     resolver: zodResolver(entrySchema),
-    defaultValues: { date: todayBr(), description: "", amount: "", notes: "" },
+    defaultValues: { date: todayBr(), description: "", amount: "", cash_account_id: "", notes: "" },
   });
   const dateValue = useWatch({ control: form.control, name: "date" }) ?? "";
   async function submit(values: EntryForm) {
     try {
       await createEntry(createClient(), values);
-      form.reset({ date: todayBr(), description: "", amount: "", notes: "" });
-      const monthValue = values.date.slice(0, 7);
+      const account = cashAccounts.find((candidate) => candidate.id === values.cash_account_id);
+      form.reset({ date: todayBr(), description: "", amount: "", cash_account_id: values.cash_account_id, notes: "" });
       onFeedback({
         tone: "success",
         title: "Entrada registrada",
-        description: `Ela ja aparece em ${monthLabel(monthValue)}.`,
-        href: `/inicio?mes=${monthValue}`,
-        hrefLabel: "Ver no Inicio",
+        description: `O valor foi adicionado ao saldo de ${account?.name ?? "sua conta"}.`,
+        href: "/caixa",
+        hrefLabel: "Ver no Caixa",
       });
     } catch (err) {
       onFeedback({ tone: "error", title: "Nao foi possivel salvar a entrada", description: err instanceof Error ? err.message : "Tente novamente." });
     }
   }
   return (
-    <FormCard onSubmit={form.handleSubmit(submit)} submitLabel="Salvar entrada">
+    <FormCard onSubmit={form.handleSubmit(submit)} submitLabel="Salvar entrada" disabled={cashAccounts.length === 0}>
+      {cashAccounts.length === 0 ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <p className="font-bold">Crie uma conta antes de registrar entradas.</p>
+          <p className="mt-1">Toda entrada precisa aumentar o saldo de uma conta do caixa.</p>
+          <Link href="/caixa" className="mt-3 inline-flex rounded-lg bg-gray-950 px-3 py-2 font-bold text-white">
+            Criar conta no Caixa
+          </Link>
+        </div>
+      ) : null}
       <TextInput label="Descricao" error={form.formState.errors.description?.message} {...form.register("description")} />
       <TextInput label="Valor" inputMode="decimal" placeholder="3000,00" error={form.formState.errors.amount?.message} {...form.register("amount")} />
+      <Select label="Conta de destino" error={form.formState.errors.cash_account_id?.message} {...form.register("cash_account_id")}>
+        <option value="">Escolha uma conta</option>
+        {cashAccounts.map((account) => (
+          <option key={account.id} value={account.id}>{account.name} - {formatCurrency(account.balance)}</option>
+        ))}
+      </Select>
       <DateInput
         label="Data"
         error={form.formState.errors.date?.message}
@@ -563,11 +585,11 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
   );
 }
 
-function FormCard({ children, onSubmit, submitLabel }: { children: React.ReactNode; onSubmit: () => void; submitLabel: string }) {
+function FormCard({ children, onSubmit, submitLabel, disabled = false }: { children: React.ReactNode; onSubmit: () => void; submitLabel: string; disabled?: boolean }) {
   return (
     <form onSubmit={onSubmit} className="space-y-4 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
       {children}
-      <button type="submit" className="h-12 w-full rounded-lg bg-gray-950 font-bold text-white">{submitLabel}</button>
+      <button type="submit" disabled={disabled} className="h-12 w-full rounded-lg bg-gray-950 font-bold text-white disabled:cursor-not-allowed disabled:opacity-50">{submitLabel}</button>
     </form>
   );
 }
