@@ -17,7 +17,7 @@ import type {
   Payable,
   PaymentStatus,
 } from "@/types/finance";
-import { currentMonthValue, monthRange } from "@/lib/dates/format";
+import { monthRange } from "@/lib/dates/format";
 import { getInvoiceDueDate, toIsoDate } from "@/lib/dates/invoice";
 
 export type MonthData = {
@@ -54,6 +54,39 @@ export type OpenData = {
   openCardGroups: OpenCardGroup[];
 };
 
+export type FinanceListRecord = {
+  id: string;
+  type: "entry" | "expense" | "payable" | "purchase";
+  title: string;
+  amount: number;
+  date: string;
+  status: PaymentStatus;
+  category: string | null;
+  cardId: string | null;
+  payload: {
+    entry?: EntryWithCashAccount;
+    expense?: Expense;
+    payables?: Payable[];
+    paid_installments?: number;
+    total_installments?: number;
+    first_due_date?: string;
+    last_due_date?: string;
+    next_due_date?: string | null;
+    purchase_date?: string;
+    purchase?: CardPurchaseWithProgress & {
+      cards?: Card | null;
+      card_installments?: (CardInstallment & { card_invoices?: CardInvoice | null })[];
+    };
+  };
+};
+
+export type FinanceListPage = {
+  items: FinanceListRecord[];
+  total: number;
+  cards: Card[];
+  cashAccounts: CashAccount[];
+};
+
 async function currentUserId(supabase: SupabaseClient) {
   const { data, error } = await supabase.auth.getUser();
   if (error || !data.user) throw new Error("Usuario nao autenticado.");
@@ -63,43 +96,29 @@ async function currentUserId(supabase: SupabaseClient) {
 export async function fetchCards(supabase: SupabaseClient) {
   const { data, error } = await supabase
     .from("cards")
-    .select("*")
+    .select("id,user_id,name,issuer,color,closing_day,due_day,is_active,created_at,updated_at")
     .order("is_active", { ascending: false })
     .order("name", { ascending: true });
   if (error) throw error;
   return (data ?? []) as Card[];
 }
 
-function withCashBalances(accounts: CashAccount[], transactions: CashTransaction[]): CashAccountWithBalance[] {
-  return accounts.map((account) => ({
-    ...account,
-    balance: transactions
-      .filter((transaction) => transaction.account_id === account.id)
-      .reduce((sum, transaction) => sum + Number(transaction.amount), 0),
-  }));
-}
-
 export async function fetchCashAccounts(supabase: SupabaseClient) {
-  const [accounts, transactions] = await Promise.all([
-    supabase.from("cash_accounts").select("*").order("is_active", { ascending: false }).order("name"),
-    supabase.from("cash_transactions").select("*"),
-  ]);
-  const error = accounts.error ?? transactions.error;
+  const { data, error } = await supabase.rpc("cash_accounts_with_balance");
   if (error) throw error;
-  return withCashBalances((accounts.data ?? []) as CashAccount[], (transactions.data ?? []) as CashTransaction[]);
+  return (data ?? []) as CashAccountWithBalance[];
 }
 
 export async function fetchCashData(supabase: SupabaseClient) {
   const [accounts, transactions] = await Promise.all([
-    supabase.from("cash_accounts").select("*").order("is_active", { ascending: false }).order("name"),
-    supabase.from("cash_transactions").select("*, cash_accounts(name, color)").order("date", { ascending: false }).order("created_at", { ascending: false }).limit(100),
+    supabase.rpc("cash_accounts_with_balance"),
+    supabase.from("cash_transactions").select("id,user_id,account_id,type,amount,date,description,source_type,source_id,notes,created_at,cash_accounts(name,color)").order("date", { ascending: false }).order("created_at", { ascending: false }).limit(100),
   ]);
-  const balanceTransactions = await supabase.from("cash_transactions").select("*");
-  const error = accounts.error ?? transactions.error ?? balanceTransactions.error;
+  const error = accounts.error ?? transactions.error;
   if (error) throw error;
   return {
-    accounts: withCashBalances((accounts.data ?? []) as CashAccount[], (balanceTransactions.data ?? []) as CashTransaction[]),
-    transactions: (transactions.data ?? []) as (CashTransaction & { cash_accounts?: Pick<CashAccount, "name" | "color"> | null })[],
+    accounts: (accounts.data ?? []) as CashAccountWithBalance[],
+    transactions: (transactions.data ?? []) as unknown as (CashTransaction & { cash_accounts?: Pick<CashAccount, "name" | "color"> | null })[],
   };
 }
 
@@ -111,49 +130,53 @@ export async function fetchCashHistory(
     accountId?: string;
     type?: string;
     sourceType?: string;
+    offset?: number;
+    limit?: number;
   },
 ) {
-  const accountsPromise = supabase.from("cash_accounts").select("*").order("is_active", { ascending: false }).order("name");
-  let query = supabase
-    .from("cash_transactions")
-    .select("*, cash_accounts(name, color)")
-    .order("date", { ascending: false })
-    .order("created_at", { ascending: false });
-
-  if (filters.start) query = query.gte("date", filters.start);
-  if (filters.end) query = query.lte("date", filters.end);
-  if (filters.accountId && filters.accountId !== "all") query = query.eq("account_id", filters.accountId);
-  if (filters.type && filters.type !== "all") query = query.eq("type", filters.type);
-  if (filters.sourceType && filters.sourceType !== "all") query = query.eq("source_type", filters.sourceType);
-
-  const [accounts, transactions] = await Promise.all([accountsPromise, query]);
-  const error = accounts.error ?? transactions.error;
+  const [accounts, page] = await Promise.all([
+    supabase.from("cash_accounts").select("id,user_id,name,color,is_active,created_at,updated_at").order("is_active", { ascending: false }).order("name"),
+    supabase.rpc("cash_history_page", {
+      p_start: filters.start || null,
+      p_end: filters.end || null,
+      p_account_id: filters.accountId && filters.accountId !== "all" ? filters.accountId : null,
+      p_type: filters.type && filters.type !== "all" ? filters.type : null,
+      p_source_type: filters.sourceType && filters.sourceType !== "all" ? filters.sourceType : null,
+      p_offset: filters.offset ?? 0,
+      p_limit: filters.limit ?? 50,
+    }),
+  ]);
+  const error = accounts.error ?? page.error;
   if (error) throw error;
+
+  const result = page.data?.[0] as { items?: unknown[]; total?: number; total_income?: number; total_outcome?: number } | undefined;
 
   return {
     accounts: (accounts.data ?? []) as CashAccount[],
-    transactions: (transactions.data ?? []) as (CashTransaction & { cash_accounts?: Pick<CashAccount, "name" | "color"> | null })[],
+    transactions: (result?.items ?? []) as (CashTransaction & { cash_accounts?: Pick<CashAccount, "name" | "color"> | null })[],
+    total: Number(result?.total ?? 0),
+    totalIncome: Number(result?.total_income ?? 0),
+    totalOutcome: Number(result?.total_outcome ?? 0),
   };
 }
 
 export async function fetchMonthData(supabase: SupabaseClient, monthValue: string): Promise<MonthData> {
   const { start, end, year, month } = monthRange(monthValue);
-  const [cards, entries, expenses, payables, invoices, cashAccounts, cashTransactions] = await Promise.all([
-    supabase.from("cards").select("*").order("name"),
-    supabase.from("entries").select("*").gte("date", start).lte("date", end).order("date"),
-    supabase.from("expenses").select("*").gte("due_date", start).lte("due_date", end).order("due_date"),
-    supabase.from("payables").select("*").gte("due_date", start).lte("due_date", end).order("due_date"),
+  const [cards, entries, expenses, payables, invoices, cashAccounts] = await Promise.all([
+    supabase.from("cards").select("id,user_id,name,issuer,color,closing_day,due_day,is_active,created_at,updated_at").order("name"),
+    supabase.from("entries").select("id,user_id,description,amount,date,cash_transaction_id,notes,created_at,updated_at").gte("date", start).lte("date", end).order("date"),
+    supabase.from("expenses").select("id,user_id,description,amount,due_date,payment_method,category,status,cash_transaction_id,notes,created_at,updated_at").gte("due_date", start).lte("due_date", end).order("due_date"),
+    supabase.from("payables").select("id,user_id,description,amount,purchase_date,due_date,category,status,payable_group_id,installment_number,installments_count,cash_transaction_id,notes,created_at,updated_at").gte("due_date", start).lte("due_date", end).order("due_date"),
     supabase
       .from("card_invoices")
       .select("*, cards(*), card_installments(*)")
       .eq("invoice_year", year)
       .eq("invoice_month", month)
       .order("due_date"),
-    supabase.from("cash_accounts").select("*").order("name"),
-    supabase.from("cash_transactions").select("*"),
+    supabase.rpc("cash_accounts_with_balance"),
   ]);
 
-  const error = cards.error ?? entries.error ?? expenses.error ?? payables.error ?? invoices.error ?? cashAccounts.error ?? cashTransactions.error;
+  const error = cards.error ?? entries.error ?? expenses.error ?? payables.error ?? invoices.error ?? cashAccounts.error;
   if (error) throw error;
 
   return {
@@ -161,136 +184,71 @@ export async function fetchMonthData(supabase: SupabaseClient, monthValue: strin
     entries: (entries.data ?? []) as Entry[],
     expenses: (expenses.data ?? []) as Expense[],
     payables: (payables.data ?? []) as Payable[],
-    cashAccounts: withCashBalances((cashAccounts.data ?? []) as CashAccount[], (cashTransactions.data ?? []) as CashTransaction[]),
+    cashAccounts: (cashAccounts.data ?? []) as CashAccountWithBalance[],
     invoices: (invoices.data ?? []) as (CardInvoiceWithCard & { card_installments: CardInstallment[] })[],
   };
 }
 
 export async function fetchOpenData(supabase: SupabaseClient): Promise<OpenData> {
-  const { year: currentYear, month: currentMonth } = monthRange(currentMonthValue());
-  const [cards, expenses, payables, purchases, cashAccounts, cashTransactions] = await Promise.all([
-    supabase.from("cards").select("*").order("name"),
-    supabase.from("expenses").select("*").eq("status", "pending").order("due_date"),
-    supabase.from("payables").select("*").eq("status", "pending").order("due_date"),
-    supabase
-      .from("card_purchases")
-      .select("*, cards(*), card_installments(*, card_invoices(*))")
-      .eq("status", "active")
-      .order("purchase_date", { ascending: false }),
-    supabase.from("cash_accounts").select("*").order("name"),
-    supabase.from("cash_transactions").select("*"),
+  const [cards, expenses, payables, groups, cashAccounts] = await Promise.all([
+    supabase.from("cards").select("id,user_id,name,issuer,color,closing_day,due_day,is_active,created_at,updated_at").order("name"),
+    supabase.from("expenses").select("id,user_id,description,amount,due_date,payment_method,category,status,cash_transaction_id,notes,created_at,updated_at").eq("status", "pending").order("due_date"),
+    supabase.from("payables").select("id,user_id,description,amount,purchase_date,due_date,category,status,payable_group_id,installment_number,installments_count,cash_transaction_id,notes,created_at,updated_at").eq("status", "pending").order("due_date"),
+    supabase.rpc("open_card_groups"),
+    supabase.rpc("cash_accounts_with_balance"),
   ]);
 
-  const error = cards.error ?? expenses.error ?? payables.error ?? purchases.error ?? cashAccounts.error ?? cashTransactions.error;
+  const error = cards.error ?? expenses.error ?? payables.error ?? groups.error ?? cashAccounts.error;
   if (error) throw error;
-
-  const groups = new Map<string, OpenCardGroup>();
-  for (const purchase of purchases.data ?? []) {
-    const installments = ((purchase.card_installments ?? []) as (CardInstallment & { card_invoices?: CardInvoice | null })[])
-      .filter((installment) => installment.card_invoices?.status !== "paid")
-      .filter((installment) => {
-        if (!purchase.is_recurring) return true;
-        return installment.invoice_year === currentYear && installment.invoice_month === currentMonth;
-      })
-      .sort((a, b) => a.due_date.localeCompare(b.due_date));
-
-    if (installments.length === 0) continue;
-
-    const openTotal = installments.reduce((sum, installment) => sum + Number(installment.amount), 0);
-    const openPurchase = {
-      ...purchase,
-      open_installments: installments,
-      open_total: openTotal,
-      open_installments_count: installments.length,
-      paid_installments: (purchase.card_installments ?? []).filter((installment: CardInstallment & { card_invoices?: CardInvoice | null }) => installment.card_invoices?.status === "paid").length,
-      active_installments: (purchase.card_installments ?? []).length,
-      next_due_date: installments[0]?.due_date ?? null,
-      has_paid_invoice: (purchase.card_installments ?? []).some((installment: CardInstallment & { card_invoices?: CardInvoice | null }) => installment.card_invoices?.status === "paid"),
-    } as OpenCardPurchase;
-
-    const cardId = purchase.card_id;
-    const existing = groups.get(cardId);
-    if (existing) {
-      existing.total += openTotal;
-      existing.purchases.push(openPurchase);
-    } else {
-      groups.set(cardId, {
-        card_id: cardId,
-        card: purchase.cards,
-        total: openTotal,
-        purchases: [openPurchase],
-      });
-    }
-  }
 
   return {
     cards: (cards.data ?? []) as Card[],
     expenses: (expenses.data ?? []) as Expense[],
     payables: (payables.data ?? []) as Payable[],
-    cashAccounts: withCashBalances((cashAccounts.data ?? []) as CashAccount[], (cashTransactions.data ?? []) as CashTransaction[]),
-    openCardGroups: [...groups.values()].sort((a, b) => b.total - a.total),
+    cashAccounts: (cashAccounts.data ?? []) as CashAccountWithBalance[],
+    openCardGroups: (groups.data ?? []) as OpenCardGroup[],
   };
 }
 
 export async function fetchListData(
   supabase: SupabaseClient,
-  range?: { start: string; end: string },
-) {
-  const entriesQuery = supabase
-    .from("entries")
-    .select("*, cash_transactions(account_id, cash_accounts(id, name, color))")
-    .order("date", { ascending: false });
-  const expensesQuery = supabase.from("expenses").select("*").order("due_date", { ascending: false });
-
-  const [cards, cashAccounts, entries, expenses, payables, purchases] = await Promise.all([
-    supabase.from("cards").select("*").order("name"),
-    supabase.from("cash_accounts").select("*").order("is_active", { ascending: false }).order("name"),
-    range ? entriesQuery.gte("date", range.start).lte("date", range.end) : entriesQuery,
-    range ? expensesQuery.gte("due_date", range.start).lte("due_date", range.end) : expensesQuery,
-    supabase.from("payables").select("*").order("due_date", { ascending: false }),
-    supabase
-    .from("card_purchases")
-    .select("*, cards(*), card_installments(*, card_invoices(*))")
-    .eq("status", "active")
-    .order("purchase_date", { ascending: false }),
+  options: {
+    range?: { start: string; end: string };
+    viewMode: string;
+    type: string;
+    status: string;
+    card: string;
+    category: string;
+    sort: string;
+    page: number;
+    pageSize: number;
+  },
+): Promise<FinanceListPage> {
+  const offset = Math.max(0, (options.page - 1) * options.pageSize);
+  const [cards, cashAccounts, page] = await Promise.all([
+    supabase.from("cards").select("id,user_id,name,issuer,color,closing_day,due_day,is_active,created_at,updated_at").order("name"),
+    supabase.from("cash_accounts").select("id,user_id,name,color,is_active,created_at,updated_at").order("is_active", { ascending: false }).order("name"),
+    supabase.rpc("finance_list_page", {
+      p_start: options.range?.start ?? null,
+      p_end: options.range?.end ?? null,
+      p_view_mode: options.viewMode,
+      p_type: options.type === "all" ? null : options.type,
+      p_status: options.status === "all" ? null : options.status,
+      p_card_id: options.card === "all" ? null : options.card,
+      p_category: options.category === "all" ? null : options.category,
+      p_sort: options.sort,
+      p_offset: offset,
+      p_limit: options.pageSize,
+    }),
   ]);
-
-  const error = cards.error ?? cashAccounts.error ?? entries.error ?? expenses.error ?? payables.error ?? purchases.error;
+  const error = cards.error ?? cashAccounts.error ?? page.error;
   if (error) throw error;
-
-  const activePurchases = (purchases.data ?? []).map((purchase) => {
-    const installments = (purchase.card_installments ?? []) as (CardInstallment & { card_invoices?: CardInvoice | null })[];
-    const installmentsInRange = range ? installments.filter((installment) => installment.due_date >= range.start && installment.due_date <= range.end) : installments;
-    const openInstallmentsInRange = installmentsInRange.filter((installment) => installment.card_invoices?.status !== "paid");
-    const activeInstallments = installments.length;
-    const paidInstallments = installments.filter((installment) => installment.card_invoices?.status === "paid").length;
-    const nextDueDate =
-      installments
-        .filter((installment) => installment.card_invoices?.status !== "paid")
-        .sort((a, b) => a.due_date.localeCompare(b.due_date))[0]?.due_date ?? null;
-
-    return {
-      ...purchase,
-      paid_installments: paidInstallments,
-      active_installments: activeInstallments,
-      installments_in_range: installmentsInRange,
-      open_installments_in_range: openInstallmentsInRange,
-      next_due_date: nextDueDate,
-      has_paid_invoice: paidInstallments > 0,
-    };
-  }).filter((purchase) => {
-    if (!range) return true;
-    const purchaseInRange = purchase.purchase_date >= range.start && purchase.purchase_date <= range.end;
-    return purchaseInRange || (purchase.installments_in_range?.length ?? 0) > 0;
-  }) as CardPurchaseWithProgress[];
-
+  const result = page.data?.[0] as { items?: FinanceListRecord[]; total?: number } | undefined;
   return {
     cards: (cards.data ?? []) as Card[],
     cashAccounts: (cashAccounts.data ?? []) as CashAccount[],
-    entries: (entries.data ?? []) as EntryWithCashAccount[],
-    expenses: (expenses.data ?? []) as Expense[],
-    payables: (payables.data ?? []) as Payable[],
-    purchases: activePurchases,
+    items: result?.items ?? [],
+    total: Number(result?.total ?? 0),
   };
 }
 

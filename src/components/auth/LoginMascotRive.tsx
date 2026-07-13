@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRive, useStateMachineInput } from "@rive-app/react-canvas";
+import { lazy, Suspense, useEffect, useState } from "react";
 
-type LoginMascotRiveProps = {
+export type LoginMascotRiveProps = {
   emailValue: string;
   isEmailFocused: boolean;
   isPasswordFocused: boolean;
@@ -13,12 +12,7 @@ type LoginMascotRiveProps = {
   pointerLook?: number;
 };
 
-const stateMachine = "LoginStateMachine";
-
-function setInput(input: ReturnType<typeof useStateMachineInput>, value: boolean | number) {
-  if (!input) return;
-  input.value = value;
-}
+const RiveMascotCanvas = lazy(() => import("./RiveMascotCanvas").then((module) => ({ default: module.RiveMascotCanvas })));
 
 export function LoginMascotRive({
   emailValue,
@@ -61,71 +55,8 @@ export function LoginMascotRive({
     );
   }
 
-  return (
-    <RiveMascot
-      emailValue={emailValue}
-      isEmailFocused={isEmailFocused}
-      isPasswordFocused={isPasswordFocused}
-      isSubmitting={isSubmitting}
-      isSuccess={isSuccess}
-      isError={isError}
-      pointerLook={pointerLook}
-    />
-  );
-}
-
-function RiveMascot({
-  emailValue,
-  isEmailFocused,
-  isPasswordFocused,
-  isSubmitting,
-  isSuccess,
-  isError,
-  pointerLook = 0,
-}: LoginMascotRiveProps) {
-  const [failed, setFailed] = useState(false);
-  const { RiveComponent, rive } = useRive({
-    src: "/rive/login-mascot.riv",
-    stateMachines: stateMachine,
-    autoplay: true,
-    onLoadError: () => setFailed(true),
-  });
-
-  const isTypingEmail = useStateMachineInput(rive, stateMachine, "isTypingEmail");
-  const isTypingPassword = useStateMachineInput(rive, stateMachine, "isTypingPassword");
-  const passwordFocused = useStateMachineInput(rive, stateMachine, "isPasswordFocused");
-  const isChecking = useStateMachineInput(rive, stateMachine, "isChecking");
-  const success = useStateMachineInput(rive, stateMachine, "isSuccess");
-  const error = useStateMachineInput(rive, stateMachine, "isError");
-  const lookValue = useStateMachineInput(rive, stateMachine, "lookValue");
-
-  useEffect(() => {
-    setInput(isTypingEmail, isEmailFocused || emailValue.length > 0);
-    setInput(isTypingPassword, isPasswordFocused);
-    setInput(passwordFocused, isPasswordFocused);
-    setInput(isChecking, isSubmitting);
-    setInput(success, isSuccess);
-    setInput(error, isError);
-    setInput(lookValue, Math.min(emailValue.length * 3, 100));
-  }, [
-    emailValue,
-    error,
-    isChecking,
-    isEmailFocused,
-    isError,
-    isPasswordFocused,
-    isSubmitting,
-    isSuccess,
-    isTypingEmail,
-    isTypingPassword,
-    lookValue,
-    passwordFocused,
-    success,
-  ]);
-
-  if (failed) {
-    return (
-      <MascotFallback
+  const fallback = (
+    <MascotFallback
         emailValue={emailValue}
         isEmailFocused={isEmailFocused}
         isPasswordFocused={isPasswordFocused}
@@ -134,14 +65,21 @@ function RiveMascot({
         isError={isError}
         pointerLook={pointerLook}
       />
-    );
-  }
+  );
 
   return (
-    <div className="relative mx-auto mb-5 h-36 w-36 overflow-hidden rounded-full border border-gray-200 bg-white shadow-sm">
-      <RiveComponent className="h-full w-full" />
-      <div className="pointer-events-none absolute inset-0 rounded-full ring-1 ring-inset ring-white/60" />
-    </div>
+    <Suspense fallback={fallback}>
+      <RiveMascotCanvas
+        emailValue={emailValue}
+        isEmailFocused={isEmailFocused}
+        isPasswordFocused={isPasswordFocused}
+        isSubmitting={isSubmitting}
+        isSuccess={isSuccess}
+        isError={isError}
+        pointerLook={pointerLook}
+        fallback={fallback}
+      />
+    </Suspense>
   );
 }
 

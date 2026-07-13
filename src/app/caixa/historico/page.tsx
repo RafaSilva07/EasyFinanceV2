@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Filter } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
@@ -41,6 +41,8 @@ const historyFilters = [
   { value: "reversal", label: "Estornos" },
 ];
 
+const historyPageSize = 50;
+
 function resolveHistoryFilter(value: string) {
   if (value === "income") return { type: "income", sourceType: "all" };
   if (value === "manual_out") return { type: "expense", sourceType: "manual" };
@@ -60,11 +62,21 @@ export default function CaixaHistoricoPage() {
   const [historyType, setHistoryType] = useState("all");
   const [accounts, setAccounts] = useState<CashAccount[]>([]);
   const [transactions, setTransactions] = useState<(CashTransaction & { cash_accounts?: Pick<CashAccount, "name" | "color"> | null })[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [totals, setTotals] = useState({ income: 0, outcome: 0, balance: 0 });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const filterKey = `${startDate}|${endDate}|${accountId}|${historyType}`;
+  const filterKeyRef = useRef(filterKey);
 
-  const load = useCallback(async () => {
+  useEffect(() => {
+    filterKeyRef.current = filterKey;
+  }, [filterKey]);
+
+  const load = useCallback(async (offset = 0, append = false) => {
     if (!hasSupabaseConfig()) return;
+    const requestKey = filterKey;
     setLoading(true);
     setError("");
     try {
@@ -75,25 +87,36 @@ export default function CaixaHistoricoPage() {
         accountId,
         type: resolvedFilter.type,
         sourceType: resolvedFilter.sourceType,
+        offset,
+        limit: historyPageSize,
       });
+      if (requestKey !== filterKeyRef.current) return;
       setAccounts(data.accounts);
-      setTransactions(data.transactions);
+      setTransactions((current) => append ? [...current, ...data.transactions.filter((item) => !current.some((existing) => existing.id === item.id))] : data.transactions);
+      setTotalCount(data.total);
+      setTotals({ income: data.totalIncome, outcome: data.totalOutcome, balance: data.totalIncome - data.totalOutcome });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel carregar o historico.");
     } finally {
       setLoading(false);
     }
-  }, [accountId, endDate, historyType, startDate]);
+  }, [accountId, endDate, filterKey, historyType, startDate]);
 
   useEffect(() => {
-    load();
+    setTransactions([]);
+    setTotalCount(0);
+    load(0, false);
   }, [load]);
 
-  const totals = useMemo(() => {
-    const income = transactions.filter((item) => Number(item.amount) > 0).reduce((sum, item) => sum + Number(item.amount), 0);
-    const outcome = transactions.filter((item) => Number(item.amount) < 0).reduce((sum, item) => sum + Math.abs(Number(item.amount)), 0);
-    return { income, outcome, balance: income - outcome };
-  }, [transactions]);
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || loading || transactions.length >= totalCount) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0]?.isIntersecting) load(transactions.length, true);
+    }, { rootMargin: "240px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [load, loading, totalCount, transactions.length]);
 
   return (
     <AuthGuard>
@@ -168,6 +191,7 @@ export default function CaixaHistoricoPage() {
                   </p>
                 </div>
               ))}
+              <div ref={sentinelRef} className="h-px" aria-hidden="true" />
             </div>
           )}
         </section>

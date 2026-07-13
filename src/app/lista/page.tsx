@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, Circle, Edit3, Trash2, XCircle } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
@@ -19,6 +19,7 @@ import {
   updatePayable,
   updatePayableGroup,
   updateStatus,
+  type FinanceListRecord,
 } from "@/features/finance/api";
 import { currentMonthRange, formatDateBr } from "@/lib/dates/format";
 import { expenseCategories, getCategoryLabel } from "@/lib/finance/categories";
@@ -127,72 +128,6 @@ const sortOptions: { value: SortMode; label: string }[] = [
 
 const pageSizeOptions = [10, 20, 50];
 
-function isInRange(value: string, start: string, end: string) {
-  return value >= start && value <= end;
-}
-
-function groupPayables(payables: Payable[], range: { start: string; end: string } | null) {
-  const groupCounts = payables.reduce<Record<string, number>>((counts, payable) => {
-    counts[payable.payable_group_id] = (counts[payable.payable_group_id] ?? 0) + 1;
-    return counts;
-  }, {});
-  const groups = new Map<string, Payable[]>();
-  payables.forEach((payable) => {
-    const key = payable.installments_count > 1 && groupCounts[payable.payable_group_id] === 1
-      ? [
-          payable.description.trim().toLowerCase(),
-          payable.purchase_date,
-          payable.category,
-          payable.installments_count,
-          payable.notes ?? "",
-        ].join("|")
-      : payable.payable_group_id || payable.id;
-    groups.set(key, [...(groups.get(key) ?? []), payable]);
-  });
-
-  return [...groups.entries()].flatMap(([groupId, groupItems]) => {
-    const sorted = groupItems.slice().sort((a, b) => a.installment_number - b.installment_number);
-    const matchesRange = !range || sorted.some((item) => isInRange(item.purchase_date, range.start, range.end) || isInRange(item.due_date, range.start, range.end));
-    if (!matchesRange) return [];
-
-    const representative = sorted.find((item) => item.status === "pending") ?? sorted[0];
-    const paidInstallments = sorted.filter((item) => item.status === "paid").length;
-    const totalInstallments = Math.max(...sorted.map((item) => item.installments_count || sorted.length), sorted.length);
-    const lastPaid = sorted
-      .filter((item) => item.status === "paid")
-      .sort((a, b) => b.installment_number - a.installment_number)[0];
-    const nextDueItem = sorted
-      .filter((item) => item.status !== "paid")
-      .sort((a, b) => a.due_date.localeCompare(b.due_date))[0];
-    const nextDueDate = sorted
-      .filter((item) => item.status !== "paid")
-      .sort((a, b) => a.due_date.localeCompare(b.due_date))[0]?.due_date ?? null;
-    const firstDueDate = sorted.slice().sort((a, b) => a.due_date.localeCompare(b.due_date))[0]?.due_date ?? representative.due_date;
-    const lastDueDate = sorted.slice().sort((a, b) => b.due_date.localeCompare(a.due_date))[0]?.due_date ?? representative.due_date;
-    const amount = sorted.reduce((sum, item) => sum + Number(item.amount), 0);
-
-    return [{
-      id: groupId,
-      type: "payable" as const,
-      title: representative.description,
-      amount,
-      date: nextDueDate ?? lastDueDate,
-      purchaseDate: representative.purchase_date,
-      status: paidInstallments >= sorted.length ? "paid" as PaymentStatus : "pending" as PaymentStatus,
-      category: representative.category,
-      payable: representative,
-      payables: sorted,
-      paidInstallments,
-      totalInstallments,
-      firstDueDate,
-      lastPaidText: lastPaid ? `${lastPaid.installment_number}/${lastPaid.installments_count} paga em ${formatDateBr(lastPaid.due_date)}` : null,
-      nextDueText: nextDueItem ? `${nextDueItem.installment_number}/${nextDueItem.installments_count} vence em ${formatDateBr(nextDueItem.due_date)}` : null,
-      nextDueDate,
-      lastDueDate,
-    }];
-  });
-}
-
 function getPurchaseInstallments(purchase: CardPurchaseWithProgress) {
   return ((purchase as CardPurchaseWithProgress & {
     card_installments?: Array<{
@@ -205,44 +140,63 @@ function getPurchaseInstallments(purchase: CardPurchaseWithProgress) {
   }).card_installments ?? []).slice().sort((a, b) => a.installment_number - b.installment_number);
 }
 
-function groupPurchases(purchases: CardPurchaseWithProgress[]) {
-  const groups = new Map<string, CardPurchaseWithProgress>();
-  purchases.forEach((purchase) => {
-    if (!groups.has(purchase.id)) groups.set(purchase.id, purchase);
-  });
-  return [...groups.values()];
-}
-
-function statusRank(item: ListItem) {
-  if (item.type === "entry") return 2;
-  if (item.type === "purchase") return item.purchase.paid_installments >= item.purchase.active_installments ? 1 : 0;
-  return item.status === "paid" ? 1 : 0;
-}
-
-function itemDate(item: ListItem) {
-  return item.date;
-}
-
-function itemDueDate(item: ListItem) {
-  if (item.type === "entry") return item.date;
-  if (item.type === "purchase") return item.purchase.next_due_date ?? item.date;
-  if (item.type === "payable") return item.nextDueDate ?? item.lastDueDate;
-  return item.date;
-}
-
-function itemCategory(item: ListItem) {
-  return item.type === "entry" ? "" : getCategoryLabel(item.category);
-}
-
-function compareListItems(a: ListItem, b: ListItem, sortMode: SortMode) {
-  if (sortMode === "date-asc") return itemDate(a).localeCompare(itemDate(b));
-  if (sortMode === "due-asc") return itemDueDate(a).localeCompare(itemDueDate(b));
-  if (sortMode === "amount-desc") return b.amount - a.amount;
-  if (sortMode === "amount-asc") return a.amount - b.amount;
-  if (sortMode === "pending-first") return statusRank(a) - statusRank(b) || itemDueDate(a).localeCompare(itemDueDate(b));
-  if (sortMode === "category-asc") return itemCategory(a).localeCompare(itemCategory(b)) || itemDate(b).localeCompare(itemDate(a));
-  if (sortMode === "type-asc") return labelType(a.type).localeCompare(labelType(b.type)) || itemDate(b).localeCompare(itemDate(a));
-  return itemDate(b).localeCompare(itemDate(a));
+function recordToListItem(record: FinanceListRecord): ListItem | null {
+  if (record.type === "entry" && record.payload.entry) {
+    return { id: record.id, type: "entry", title: record.title, amount: Number(record.amount), date: record.date, entry: record.payload.entry };
+  }
+  if (record.type === "expense" && record.payload.expense) {
+    const expense = record.payload.expense;
+    return { id: record.id, type: "expense", title: record.title, amount: Number(record.amount), date: record.date, status: expense.status, category: expense.category, expense };
+  }
+  if (record.type === "payable" && record.payload.payables?.length) {
+    const payables = record.payload.payables.slice().sort((a, b) => a.installment_number - b.installment_number || a.due_date.localeCompare(b.due_date));
+    const pending = payables.filter((item) => item.status === "pending").sort((a, b) => a.due_date.localeCompare(b.due_date));
+    const lastPaid = payables.filter((item) => item.status === "paid").sort((a, b) => b.installment_number - a.installment_number)[0];
+    const representative = pending[0] ?? payables[0];
+    const nextDue = pending[0] ?? null;
+    return {
+      id: record.id,
+      type: "payable",
+      title: record.title,
+      amount: Number(record.amount),
+      date: record.date,
+      purchaseDate: record.payload.purchase_date ?? representative.purchase_date,
+      status: record.status,
+      category: representative.category,
+      payable: representative,
+      payables,
+      paidInstallments: Number(record.payload.paid_installments ?? 0),
+      totalInstallments: Number(record.payload.total_installments ?? payables.length),
+      firstDueDate: record.payload.first_due_date ?? payables[0].due_date,
+      lastPaidText: lastPaid ? `${lastPaid.installment_number}/${lastPaid.installments_count} paga em ${formatDateBr(lastPaid.due_date)}` : null,
+      nextDueText: nextDue ? `${nextDue.installment_number}/${nextDue.installments_count} vence em ${formatDateBr(nextDue.due_date)}` : null,
+      nextDueDate: record.payload.next_due_date ?? null,
+      lastDueDate: record.payload.last_due_date ?? payables[payables.length - 1].due_date,
+    };
+  }
+  if (record.type === "purchase" && record.payload.purchase) {
+    const purchase = record.payload.purchase;
+    const installments = getPurchaseInstallments(purchase);
+    const lastPaid = installments.filter((item) => item.card_invoices?.status === "paid").sort((a, b) => b.installment_number - a.installment_number)[0];
+    const nextDue = installments.filter((item) => item.card_invoices?.status !== "paid").sort((a, b) => a.due_date.localeCompare(b.due_date))[0];
+    return {
+      id: record.id,
+      type: "purchase",
+      purchase,
+      title: record.title,
+      amount: Number(record.amount),
+      date: record.date,
+      category: purchase.category,
+      cardId: purchase.card_id,
+      card: purchase.cards,
+      hasOpenInvoice: purchase.active_installments > purchase.paid_installments,
+      hasOpenInvoiceInRange: Boolean(purchase.open_installments_in_range?.length),
+      hasInvoiceInRange: Boolean(purchase.installments_in_range?.length),
+      lastPaidText: lastPaid ? `${lastPaid.installment_number}/${lastPaid.installments_count} paga em fatura ${formatDateBr(lastPaid.due_date)}` : null,
+      nextDueText: nextDue ? `${nextDue.installment_number}/${nextDue.installments_count} vence em ${formatDateBr(nextDue.due_date)}` : null,
+    };
+  }
+  return null;
 }
 
 export default function ListaPage() {
@@ -259,112 +213,58 @@ export default function ListaPage() {
   const [pageSize, setPageSize] = useState(20);
   const [page, setPage] = useState(1);
   const [items, setItems] = useState<ListItem[]>([]);
+  const [totalItems, setTotalItems] = useState(0);
   const [cards, setCards] = useState<Card[]>([]);
   const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [editing, setEditing] = useState<Extract<ListItem, { type: "purchase" }> | null>(null);
   const [editingRecord, setEditingRecord] = useState<EditableRecord | null>(null);
+  const requestIdRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!hasSupabaseConfig()) return;
     setError("");
+    const requestId = ++requestIdRef.current;
     try {
       const activeRange = periodMode === "range" ? { start: startDate, end: endDate } : undefined;
-      const data = await fetchListData(createClient(), activeRange);
+      const data = await fetchListData(createClient(), {
+        range: activeRange,
+        viewMode,
+        type,
+        status,
+        card,
+        category,
+        sort: sortMode,
+        page,
+        pageSize,
+      });
+      if (requestId !== requestIdRef.current) return;
       setCards(data.cards);
       setCashAccounts(data.cashAccounts);
-      setItems([
-        ...data.entries.map((item) => ({
-          id: item.id,
-          type: "entry" as const,
-          title: item.description,
-          amount: Number(item.amount),
-          date: item.date,
-          entry: item,
-        })),
-        ...data.expenses.map((item: Expense) => ({
-          id: item.id,
-          type: "expense" as const,
-          title: item.description,
-          amount: Number(item.amount),
-          date: item.due_date,
-          status: item.status,
-          category: item.category,
-          expense: item,
-        })),
-        ...groupPayables(data.payables, activeRange ?? null),
-        ...groupPurchases(data.purchases).map((item) => {
-          const installments = getPurchaseInstallments(item);
-          const lastPaid = installments
-            .filter((installment) => installment.card_invoices?.status === "paid")
-            .sort((a, b) => b.installment_number - a.installment_number)[0];
-          const nextDue = installments
-            .filter((installment) => installment.card_invoices?.status !== "paid")
-            .sort((a, b) => a.due_date.localeCompare(b.due_date))[0];
-
-          return {
-            id: item.id,
-            type: "purchase" as const,
-            purchase: item,
-            title: item.description,
-            amount: Number(item.installment_amount) * Number(item.installments_count),
-            date: item.purchase_date,
-            category: item.category,
-            cardId: item.card_id,
-            card: item.cards,
-            hasOpenInvoice: item.active_installments > item.paid_installments,
-            hasOpenInvoiceInRange: Boolean(item.open_installments_in_range?.length),
-            hasInvoiceInRange: Boolean(item.installments_in_range?.length),
-            lastPaidText: lastPaid ? `${lastPaid.installment_number}/${lastPaid.installments_count} paga em fatura ${formatDateBr(lastPaid.due_date)}` : null,
-            nextDueText: nextDue ? `${nextDue.installment_number}/${nextDue.installments_count} vence em ${formatDateBr(nextDue.due_date)}` : null,
-          };
-        }),
-      ]);
+      setItems(data.items.map(recordToListItem).filter((item): item is ListItem => item !== null));
+      setTotalItems(data.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao carregar lista.");
     }
-  }, [endDate, periodMode, startDate]);
+  }, [card, category, endDate, page, pageSize, periodMode, sortMode, startDate, status, type, viewMode]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const filtered = useMemo(() => {
-    return items.filter((item) => {
-      if (type !== "all" && item.type !== type) return false;
-      if (item.type === "purchase" && periodMode === "range" && viewMode === "purchases" && item.date < startDate && !item.hasInvoiceInRange) return false;
-      if (item.type === "purchase" && periodMode === "range" && viewMode === "purchases" && item.date > endDate && !item.hasInvoiceInRange) return false;
-      if (item.type === "purchase" && viewMode === "open-invoices" && !item.hasOpenInvoiceInRange) return false;
-      if (item.type === "purchase" && viewMode === "invoice-range" && !item.hasInvoiceInRange) return false;
-      if (item.type !== "purchase" && viewMode !== "purchases") return false;
-      if (item.type === "purchase" && status === "paid" && item.purchase.paid_installments < item.purchase.active_installments) return false;
-      if (item.type === "purchase" && status === "pending" && item.purchase.paid_installments >= item.purchase.active_installments) return false;
-      if (item.type === "expense" && status !== "all" && item.status !== status) return false;
-      if (item.type === "payable" && status !== "all" && item.status !== status) return false;
-      if (item.type === "entry" && status !== "all") return false;
-      if (card !== "all" && (item.type !== "purchase" || item.cardId !== card)) return false;
-      if (category !== "all" && item.type !== "entry" && item.category !== category) return false;
-      return true;
-    });
-  }, [items, type, periodMode, status, card, category, viewMode, startDate, endDate]);
-
-  const sorted = useMemo(() => {
-    return filtered.slice().sort((a, b) => compareListItems(a, b, sortMode));
-  }, [filtered, sortMode]);
-
-  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
   const safePage = Math.min(page, totalPages);
-  const paginated = useMemo(() => {
-    const start = (safePage - 1) * pageSize;
-    return sorted.slice(start, start + pageSize);
-  }, [pageSize, safePage, sorted]);
-  const pageStart = sorted.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
-  const pageEnd = Math.min(safePage * pageSize, sorted.length);
+  const pageStart = totalItems === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const pageEnd = Math.min(safePage * pageSize, totalItems);
 
   useEffect(() => {
     setPage(1);
   }, [periodMode, startDate, endDate, type, status, card, category, viewMode, sortMode, pageSize]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   async function toggleExpense(item: Extract<ListItem, { type: "expense" }>) {
     await updateStatus(createClient(), "expenses", item.id, item.status === "paid" ? "pending" : "paid");
@@ -489,12 +389,12 @@ export default function ListaPage() {
           </label>
         </div>
 
-        {sorted.length === 0 ? (
+        {items.length === 0 ? (
           <EmptyState title="Nenhum registro encontrado." actionLabel="Registrar" href="/registrar" />
         ) : (
           <>
           <div className="mb-3 flex flex-col gap-2 rounded-lg border border-gray-200 bg-white p-3 text-sm text-gray-600 sm:flex-row sm:items-center sm:justify-between">
-            <span>Mostrando {pageStart}-{pageEnd} de {sorted.length}</span>
+            <span>Mostrando {pageStart}-{pageEnd} de {totalItems}</span>
             <div className="flex items-center gap-2">
               <button type="button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={safePage <= 1} className="rounded-lg border border-gray-200 px-3 py-2 font-bold text-gray-700 disabled:opacity-50">
                 Anterior
@@ -506,7 +406,7 @@ export default function ListaPage() {
             </div>
           </div>
           <div className="space-y-3">
-            {paginated.map((item) => {
+            {items.map((item) => {
               if (item.type === "purchase") {
                 return <PurchaseRow key={`purchase-${item.id}`} item={item} onEdit={() => setEditing(item)} onCancel={() => cancelPurchase(item)} />;
               }

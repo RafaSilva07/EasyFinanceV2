@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, Circle, WalletCards } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
@@ -41,21 +41,25 @@ export default function InicioPage() {
   const [loading, setLoading] = useState(false);
   const [showCategoryDetails, setShowCategoryDetails] = useState(false);
   const [expandedInvoices, setExpandedInvoices] = useState<Record<string, boolean>>({});
+  const requestIdRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!hasSupabaseConfig()) return;
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError("");
     try {
       if (viewMode === "open") {
-        setOpenData(await fetchOpenData(createClient()));
+        const nextData = await fetchOpenData(createClient());
+        if (requestId === requestIdRef.current) setOpenData(nextData);
       } else {
-        setData(await fetchMonthData(createClient(), month));
+        const nextData = await fetchMonthData(createClient(), month);
+        if (requestId === requestIdRef.current) setData(nextData);
       }
     } catch (err) {
-      setError(getErrorMessage(err));
+      if (requestId === requestIdRef.current) setError(getErrorMessage(err));
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [month, viewMode]);
 
