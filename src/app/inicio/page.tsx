@@ -8,12 +8,14 @@ import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { PaymentAccountDialog, type PaymentRequest } from "@/components/finance/PaymentAccountDialog";
 import { currentMonthValue, formatDateBr, monthLabel } from "@/lib/dates/format";
 import { expenseCategories, getCategoryLabel, getCategoryMeta } from "@/lib/finance/categories";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import { fetchMonthData, fetchOpenData, updateInvoiceStatus, updateStatus, type MonthData, type OpenCardGroup, type OpenData } from "@/features/finance/api";
+import { fetchMonthData, fetchOpenData, payWithCash, updateInvoiceStatus, updateStatus, type MonthData, type OpenCardGroup, type OpenData } from "@/features/finance/api";
 import type { CardInstallment, Expense, Payable, PaymentStatus } from "@/types/finance";
+import { useOperation } from "@/components/providers/OperationProvider";
 
 type CategoryTotal = (typeof expenseCategories)[number] & {
   total: number;
@@ -41,7 +43,9 @@ export default function InicioPage() {
   const [loading, setLoading] = useState(false);
   const [showCategoryDetails, setShowCategoryDetails] = useState(false);
   const [expandedInvoices, setExpandedInvoices] = useState<Record<string, boolean>>({});
+  const [paymentRequest, setPaymentRequest] = useState<PaymentRequest | null>(null);
   const requestIdRef = useRef(0);
+  const { runMutation, runQuery } = useOperation();
 
   const load = useCallback(async () => {
     if (!hasSupabaseConfig()) return;
@@ -49,19 +53,21 @@ export default function InicioPage() {
     setLoading(true);
     setError("");
     try {
-      if (viewMode === "open") {
-        const nextData = await fetchOpenData(createClient());
-        if (requestId === requestIdRef.current) setOpenData(nextData);
-      } else {
-        const nextData = await fetchMonthData(createClient(), month);
-        if (requestId === requestIdRef.current) setData(nextData);
-      }
+      await runQuery(viewMode === "open" ? "Carregando pendencias..." : "Carregando resumo mensal...", async () => {
+        if (viewMode === "open") {
+          const nextData = await fetchOpenData(createClient());
+          if (requestId === requestIdRef.current) setOpenData(nextData);
+        } else {
+          const nextData = await fetchMonthData(createClient(), month);
+          if (requestId === requestIdRef.current) setData(nextData);
+        }
+      });
     } catch (err) {
       if (requestId === requestIdRef.current) setError(getErrorMessage(err));
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [month, viewMode]);
+  }, [month, runQuery, viewMode]);
 
   useEffect(() => {
     load();
@@ -139,28 +145,42 @@ export default function InicioPage() {
   const titleLabel = viewMode === "open" ? "Em aberto" : monthLabel(month);
   const payableTitle = viewMode === "open" ? "Tudo em aberto" : `A pagar em ${monthLabel(month)}`;
 
-  function chooseCashAccount() {
-    const accounts = cashAccounts.filter((account) => account.is_active);
-    if (accounts.length === 0) return null;
-    const options = accounts.map((account, index) => `${index + 1}. ${account.name} (${formatCurrency(account.balance)})`).join("\n");
-    const choice = window.prompt(`Escolha a conta de caixa para baixar o pagamento, ou deixe vazio para nao mexer no caixa:\n${options}`);
-    if (!choice) return null;
-    const index = Number(choice) - 1;
-    return accounts[index]?.id ?? null;
+  async function toggle(table: "expenses" | "payables", id: string, status: PaymentStatus, description: string, amount: number) {
+    const nextStatus = status === "paid" ? "pending" : "paid";
+    if (nextStatus === "paid") {
+      setPaymentRequest({
+        sourceType: table === "expenses" ? "expense" : "payable",
+        sourceIds: [id],
+        description,
+        amount,
+      });
+      return;
+    }
+    await runMutation("Reabrindo pagamento...", async () => {
+      await updateStatus(createClient(), table, id, nextStatus);
+      await load();
+    });
   }
 
-  async function toggle(table: "expenses" | "payables" | "card_installments", id: string, status: PaymentStatus) {
+  async function toggleInvoice(id: string, status: PaymentStatus, description: string, amount: number) {
     const nextStatus = status === "paid" ? "pending" : "paid";
-    const accountId = nextStatus === "paid" && table !== "card_installments" ? chooseCashAccount() : null;
-    await updateStatus(createClient(), table, id, nextStatus, accountId);
-    await load();
+    if (nextStatus === "paid") {
+      setPaymentRequest({ sourceType: "card_invoice", sourceIds: [id], description, amount });
+      return;
+    }
+    await runMutation("Reabrindo fatura...", async () => {
+      await updateInvoiceStatus(createClient(), id, nextStatus);
+      await load();
+    });
   }
 
-  async function toggleInvoice(id: string, status: PaymentStatus) {
-    const nextStatus = status === "paid" ? "pending" : "paid";
-    const accountId = nextStatus === "paid" ? chooseCashAccount() : null;
-    await updateInvoiceStatus(createClient(), id, nextStatus, accountId);
-    await load();
+  async function confirmPayment(accountId: string | null) {
+    if (!paymentRequest) return;
+    await runMutation(accountId ? "Processando pagamento..." : "Registrando pagamento externo...", async () => {
+      await payWithCash(createClient(), { sourceType: paymentRequest.sourceType, sourceIds: paymentRequest.sourceIds, accountId });
+      setPaymentRequest(null);
+      await load();
+    });
   }
 
   function toggleInvoiceDetails(id: string) {
@@ -261,7 +281,7 @@ export default function InicioPage() {
                 <div className="border-t border-gray-100 px-4 pb-4">
                   <button
                     type="button"
-                    onClick={() => toggleInvoice(invoice.id, invoice.status)}
+                    onClick={() => toggleInvoice(invoice.id, invoice.status, `Fatura ${invoice.cards?.name ?? "cartao"}`, total)}
                     className={`mt-3 h-11 w-full rounded-lg text-sm font-bold ${invoice.status === "paid" ? "bg-emerald-100 text-emerald-700" : "bg-gray-950 text-white"}`}
                   >
                     {invoice.status === "paid" ? "Reabrir fatura" : "Pagar fatura"}
@@ -294,8 +314,8 @@ export default function InicioPage() {
             />
           )) : null}
 
-          <GroupedExpenses expenses={visibleExpenses} onToggle={(item) => toggle("expenses", item.id, item.status)} />
-          <GroupedPayables payables={visiblePayables} onToggle={(item) => toggle("payables", item.id, item.status)} />
+          <GroupedExpenses expenses={visibleExpenses} onToggle={(item) => toggle("expenses", item.id, item.status, item.description, Number(item.amount))} />
+          <GroupedPayables payables={visiblePayables} onToggle={(item) => toggle("payables", item.id, item.status, item.description, Number(item.amount))} />
 
           {viewMode === "month" ? <div className="rounded-lg border border-gray-200 bg-white">
             <div className="border-b border-gray-100 p-4">
@@ -318,6 +338,14 @@ export default function InicioPage() {
             )}
           </div> : null}
         </section>
+        {paymentRequest ? (
+          <PaymentAccountDialog
+            request={paymentRequest}
+            accounts={cashAccounts}
+            onClose={() => setPaymentRequest(null)}
+            onConfirm={confirmPayment}
+          />
+        ) : null}
       </AppShell>
     </AuthGuard>
   );

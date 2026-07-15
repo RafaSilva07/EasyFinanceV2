@@ -11,6 +11,7 @@ import type {
   CashAccount,
   CashAccountWithBalance,
   CashTransaction,
+  CashTransactionWithActions,
   Entry,
   EntryWithCashAccount,
   Expense,
@@ -84,7 +85,7 @@ export type FinanceListPage = {
   items: FinanceListRecord[];
   total: number;
   cards: Card[];
-  cashAccounts: CashAccount[];
+  cashAccounts: CashAccountWithBalance[];
 };
 
 async function currentUserId(supabase: SupabaseClient) {
@@ -112,14 +113,36 @@ export async function fetchCashAccounts(supabase: SupabaseClient) {
 export async function fetchCashData(supabase: SupabaseClient) {
   const [accounts, transactions] = await Promise.all([
     supabase.rpc("cash_accounts_with_balance"),
-    supabase.from("cash_transactions").select("id,user_id,account_id,type,amount,date,description,source_type,source_id,notes,created_at,cash_accounts(name,color)").order("date", { ascending: false }).order("created_at", { ascending: false }).limit(100),
+    supabase.rpc("cash_recent_with_actions", { p_limit: 100 }),
   ]);
   const error = accounts.error ?? transactions.error;
   if (error) throw error;
   return {
     accounts: (accounts.data ?? []) as CashAccountWithBalance[],
-    transactions: (transactions.data ?? []) as unknown as (CashTransaction & { cash_accounts?: Pick<CashAccount, "name" | "color"> | null })[],
+    transactions: (transactions.data ?? []) as CashTransactionWithActions[],
   };
+}
+
+export async function payWithCash(
+  supabase: SupabaseClient,
+  values: { sourceType: "expense" | "payable" | "card_invoice"; sourceIds: string[]; accountId: string | null },
+) {
+  const { error } = await supabase.rpc("pay_with_cash", {
+    p_source_type: values.sourceType,
+    p_source_ids: values.sourceIds,
+    p_account_id: values.accountId,
+  });
+  if (error) throw error;
+}
+
+export async function undoCashTransaction(supabase: SupabaseClient, transactionId: string) {
+  const { error } = await supabase.rpc("undo_cash_transaction", { p_transaction_id: transactionId });
+  if (error) throw error;
+}
+
+export async function deleteCashTransaction(supabase: SupabaseClient, transactionId: string) {
+  const { error } = await supabase.rpc("delete_cash_transaction", { p_transaction_id: transactionId });
+  if (error) throw error;
 }
 
 export async function fetchCashHistory(
@@ -135,7 +158,7 @@ export async function fetchCashHistory(
   },
 ) {
   const [accounts, page] = await Promise.all([
-    supabase.from("cash_accounts").select("id,user_id,name,color,is_active,created_at,updated_at").order("is_active", { ascending: false }).order("name"),
+    supabase.rpc("cash_accounts_with_balance"),
     supabase.rpc("cash_history_page", {
       p_start: filters.start || null,
       p_end: filters.end || null,
@@ -246,7 +269,7 @@ export async function fetchListData(
   const result = page.data?.[0] as { items?: FinanceListRecord[]; total?: number } | undefined;
   return {
     cards: (cards.data ?? []) as Card[],
-    cashAccounts: (cashAccounts.data ?? []) as CashAccount[],
+    cashAccounts: (cashAccounts.data ?? []) as CashAccountWithBalance[],
     items: result?.items ?? [],
     total: Number(result?.total ?? 0),
   };

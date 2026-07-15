@@ -8,12 +8,14 @@ import { Eye, EyeOff, LogIn, UserPlus } from "lucide-react";
 import { LoginMascotRive } from "@/components/auth/LoginMascotRive";
 import { loginSchema, signupSchema, type LoginFormData, type SignupFormData } from "@/lib/auth/validation";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
+import { useOperation } from "@/components/providers/OperationProvider";
 
 type Mode = "login" | "signup";
 
 export function AuthForm() {
   const router = useRouter();
   const params = useSearchParams();
+  const { runMutation } = useOperation();
   const [mode, setMode] = useState<Mode>(params.get("modo") === "cadastro" ? "signup" : "login");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
@@ -63,10 +65,10 @@ export function AuthForm() {
     }
 
     setIsSubmitting(true);
-    const { error: signInError } = await createClient().auth.signInWithPassword({
+    const { error: signInError } = await runMutation("Entrando...", () => createClient().auth.signInWithPassword({
       email: values.email,
       password: values.password,
-    });
+    }));
     setIsSubmitting(false);
 
     if (signInError) {
@@ -86,11 +88,10 @@ export function AuthForm() {
     }
 
     setIsSubmitting(true);
-    const supabase = createClient();
-    const { data, error: signUpError } = await supabase.auth.signUp({
+    const { data, error: signUpError } = await runMutation("Criando conta...", () => createClient().auth.signUp({
       email: values.email,
       password: values.password,
-    });
+    }));
 
     if (signUpError) {
       setIsSubmitting(false);

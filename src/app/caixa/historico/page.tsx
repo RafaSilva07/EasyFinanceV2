@@ -11,6 +11,7 @@ import { currentMonthRange, formatDateBr } from "@/lib/dates/format";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import type { CashAccount, CashTransaction, CashSourceType, CashTransactionType } from "@/types/finance";
+import { useOperation } from "@/components/providers/OperationProvider";
 
 const typeLabels: Record<CashTransactionType, string> = {
   income: "Entrada",
@@ -69,6 +70,7 @@ export default function CaixaHistoricoPage() {
   const sentinelRef = useRef<HTMLDivElement>(null);
   const filterKey = `${startDate}|${endDate}|${accountId}|${historyType}`;
   const filterKeyRef = useRef(filterKey);
+  const { runQuery } = useOperation();
 
   useEffect(() => {
     filterKeyRef.current = filterKey;
@@ -81,15 +83,16 @@ export default function CaixaHistoricoPage() {
     setError("");
     try {
       const resolvedFilter = resolveHistoryFilter(historyType);
-      const data = await fetchCashHistory(createClient(), {
-        start: startDate,
-        end: endDate,
-        accountId,
-        type: resolvedFilter.type,
-        sourceType: resolvedFilter.sourceType,
-        offset,
-        limit: historyPageSize,
-      });
+      const fetchPage = () => fetchCashHistory(createClient(), {
+          start: startDate,
+          end: endDate,
+          accountId,
+          type: resolvedFilter.type,
+          sourceType: resolvedFilter.sourceType,
+          offset,
+          limit: historyPageSize,
+        });
+      const data = append ? await fetchPage() : await runQuery("Carregando historico...", fetchPage);
       if (requestKey !== filterKeyRef.current) return;
       setAccounts(data.accounts);
       setTransactions((current) => append ? [...current, ...data.transactions.filter((item) => !current.some((existing) => existing.id === item.id))] : data.transactions);
@@ -100,7 +103,7 @@ export default function CaixaHistoricoPage() {
     } finally {
       setLoading(false);
     }
-  }, [accountId, endDate, filterKey, historyType, startDate]);
+  }, [accountId, endDate, filterKey, historyType, runQuery, startDate]);
 
   useEffect(() => {
     setTransactions([]);

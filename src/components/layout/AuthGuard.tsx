@@ -3,9 +3,11 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { hasSupabaseConfig, createClient } from "@/lib/supabase/client";
+import { useOperation } from "@/components/providers/OperationProvider";
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const { runQuery } = useOperation();
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -14,12 +16,12 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    const supabase = createClient();
-    supabase.auth.getSession().then(({ data }) => {
+    void runQuery("Verificando sessao...", async () => {
+      const { data } = await createClient().auth.getSession();
       if (!data.session) router.replace("/login");
       setReady(true);
     });
-  }, [router]);
+  }, [router, runQuery]);
 
   if (!ready) {
     return (

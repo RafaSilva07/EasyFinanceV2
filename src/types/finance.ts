@@ -170,3 +170,10 @@ export type CashTransaction = {
 export type CashAccountWithBalance = CashAccount & {
   balance: number;
 };
+
+export type CashTransactionWithActions = CashTransaction & {
+  cash_accounts?: Pick<CashAccount, "name" | "color"> | null;
+  is_reversed: boolean;
+  can_undo: boolean;
+  can_delete: boolean;
+};

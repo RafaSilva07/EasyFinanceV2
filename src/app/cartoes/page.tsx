@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -12,6 +12,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { fetchCards, saveCard } from "@/features/finance/api";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import type { Card } from "@/types/finance";
+import { useOperation } from "@/components/providers/OperationProvider";
 
 const schema = z.object({
   name: z.string().min(1, "Informe o nome"),
@@ -30,6 +31,7 @@ export default function CartoesPage() {
   const [editing, setEditing] = useState<Card | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const { runMutation, runQuery } = useOperation();
   const form = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
     defaultValues: {
@@ -42,14 +44,16 @@ export default function CartoesPage() {
     },
   });
 
-  async function load() {
+  const load = useCallback(async () => {
     if (!hasSupabaseConfig()) return;
-    setCards(await fetchCards(createClient()));
-  }
+    await runQuery("Carregando cartoes...", async () => {
+      setCards(await fetchCards(createClient()));
+    });
+  }, [runQuery]);
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
   function startEdit(card: Card) {
     setEditing(card);
@@ -68,11 +72,13 @@ export default function CartoesPage() {
     setError("");
     setMessage("");
     try {
-      await saveCard(createClient(), values, editing?.id);
-      setMessage(editing ? "Cartao atualizado." : "Cartao cadastrado.");
-      setEditing(null);
-      form.reset({ name: "", issuer: "", color: "#7C3AED", closing_day: 25, due_day: 5, is_active: true });
-      await load();
+      await runMutation(editing ? "Atualizando cartao..." : "Cadastrando cartao...", async () => {
+        await saveCard(createClient(), values, editing?.id);
+        setMessage(editing ? "Cartao atualizado." : "Cartao cadastrado.");
+        setEditing(null);
+        form.reset({ name: "", issuer: "", color: "#7C3AED", closing_day: 25, due_day: 5, is_active: true });
+        await load();
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao salvar cartao.");
     }

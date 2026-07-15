@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { CreditCard, Home, Landmark, ListFilter, LogOut, PlusCircle } from "lucide-react";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
+import { useOperation } from "@/components/providers/OperationProvider";
 
 const nav = [
   { href: "/inicio", label: "Inicio", icon: Home },
@@ -24,11 +25,14 @@ export function AppShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const { runMutation } = useOperation();
 
   async function signOut() {
     if (!hasSupabaseConfig()) return;
-    await createClient().auth.signOut();
-    router.push("/login");
+    await runMutation("Saindo...", async () => {
+      await createClient().auth.signOut();
+      router.push("/login");
+    });
   }
 
   return (

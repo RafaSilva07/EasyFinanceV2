@@ -7,12 +7,14 @@ import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { PaymentAccountDialog, type PaymentRequest } from "@/components/finance/PaymentAccountDialog";
 import {
   cancelCardPurchase,
   deleteEntry,
   deleteExpense,
   deletePayable,
   fetchListData,
+  payWithCash,
   updateCardPurchase,
   updateEntry,
   updateExpense,
@@ -25,7 +27,8 @@ import { currentMonthRange, formatDateBr } from "@/lib/dates/format";
 import { expenseCategories, getCategoryLabel } from "@/lib/finance/categories";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import type { Card, CardPurchaseWithProgress, CashAccount, EntryWithCashAccount, Expense, ExpenseCategory, Payable, PaymentMethod, PaymentStatus } from "@/types/finance";
+import type { Card, CardPurchaseWithProgress, CashAccountWithBalance, EntryWithCashAccount, Expense, ExpenseCategory, Payable, PaymentMethod, PaymentStatus } from "@/types/finance";
+import { useOperation } from "@/components/providers/OperationProvider";
 
 const maskDateBr = (value: string) => {
   const digits = value.replace(/\D/g, "").slice(0, 8);
@@ -215,12 +218,14 @@ export default function ListaPage() {
   const [items, setItems] = useState<ListItem[]>([]);
   const [totalItems, setTotalItems] = useState(0);
   const [cards, setCards] = useState<Card[]>([]);
-  const [cashAccounts, setCashAccounts] = useState<CashAccount[]>([]);
+  const [cashAccounts, setCashAccounts] = useState<CashAccountWithBalance[]>([]);
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [editing, setEditing] = useState<Extract<ListItem, { type: "purchase" }> | null>(null);
   const [editingRecord, setEditingRecord] = useState<EditableRecord | null>(null);
+  const [paymentRequest, setPaymentRequest] = useState<PaymentRequest | null>(null);
   const requestIdRef = useRef(0);
+  const { runMutation, runQuery } = useOperation();
 
   const load = useCallback(async () => {
     if (!hasSupabaseConfig()) return;
@@ -228,26 +233,28 @@ export default function ListaPage() {
     const requestId = ++requestIdRef.current;
     try {
       const activeRange = periodMode === "range" ? { start: startDate, end: endDate } : undefined;
-      const data = await fetchListData(createClient(), {
-        range: activeRange,
-        viewMode,
-        type,
-        status,
-        card,
-        category,
-        sort: sortMode,
-        page,
-        pageSize,
+      await runQuery("Carregando lista...", async () => {
+        const data = await fetchListData(createClient(), {
+          range: activeRange,
+          viewMode,
+          type,
+          status,
+          card,
+          category,
+          sort: sortMode,
+          page,
+          pageSize,
+        });
+        if (requestId !== requestIdRef.current) return;
+        setCards(data.cards);
+        setCashAccounts(data.cashAccounts);
+        setItems(data.items.map(recordToListItem).filter((item): item is ListItem => item !== null));
+        setTotalItems(data.total);
       });
-      if (requestId !== requestIdRef.current) return;
-      setCards(data.cards);
-      setCashAccounts(data.cashAccounts);
-      setItems(data.items.map(recordToListItem).filter((item): item is ListItem => item !== null));
-      setTotalItems(data.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao carregar lista.");
     }
-  }, [card, category, endDate, page, pageSize, periodMode, sortMode, startDate, status, type, viewMode]);
+  }, [card, category, endDate, page, pageSize, periodMode, runQuery, sortMode, startDate, status, type, viewMode]);
 
   useEffect(() => {
     load();
@@ -267,14 +274,41 @@ export default function ListaPage() {
   }, [page, totalPages]);
 
   async function toggleExpense(item: Extract<ListItem, { type: "expense" }>) {
-    await updateStatus(createClient(), "expenses", item.id, item.status === "paid" ? "pending" : "paid");
-    await load();
+    if (item.status === "pending") {
+      setPaymentRequest({ sourceType: "expense", sourceIds: [item.id], description: item.title, amount: item.amount });
+      return;
+    }
+    await runMutation("Reabrindo pagamento...", async () => {
+      await updateStatus(createClient(), "expenses", item.id, "pending");
+      await load();
+    });
   }
 
   async function togglePayable(item: Extract<ListItem, { type: "payable" }>) {
-    const nextStatus = item.status === "paid" ? "pending" : "paid";
-    await Promise.all(item.payables.map((payable) => updateStatus(createClient(), "payables", payable.id, nextStatus)));
-    await load();
+    if (item.status === "pending") {
+      const pending = item.payables.filter((payable) => payable.status === "pending");
+      setPaymentRequest({
+        sourceType: "payable",
+        sourceIds: pending.map((payable) => payable.id),
+        description: item.title,
+        amount: pending.reduce((sum, payable) => sum + Number(payable.amount), 0),
+      });
+      return;
+    }
+    await runMutation("Reabrindo conta a pagar...", async () => {
+      await Promise.all(item.payables.map((payable) => updateStatus(createClient(), "payables", payable.id, "pending")));
+      await load();
+    });
+  }
+
+  async function confirmPayment(accountId: string | null) {
+    if (!paymentRequest) return;
+    await runMutation(accountId ? "Processando pagamento..." : "Registrando pagamento externo...", async () => {
+      await payWithCash(createClient(), { sourceType: paymentRequest.sourceType, sourceIds: paymentRequest.sourceIds, accountId });
+      setPaymentRequest(null);
+      setFeedback(accountId ? "Pagamento registrado no caixa." : "Pagamento externo registrado.");
+      await load();
+    });
   }
 
   async function cancelPurchase(item: Extract<ListItem, { type: "purchase" }>) {
@@ -283,9 +317,11 @@ export default function ListaPage() {
     setError("");
     setFeedback("");
     try {
-      await cancelCardPurchase(createClient(), item.id);
-      setFeedback("Compra cancelada e removida das faturas pendentes.");
-      await load();
+      await runMutation("Cancelando compra...", async () => {
+        await cancelCardPurchase(createClient(), item.id);
+        setFeedback("Compra cancelada e removida das faturas pendentes.");
+        await load();
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel cancelar a compra.");
     }
@@ -297,17 +333,19 @@ export default function ListaPage() {
     setError("");
     setFeedback("");
     try {
-      if (item.type === "entry") {
-        await deleteEntry(createClient(), item.id);
-        setFeedback("Entrada excluida.");
-      } else if (item.type === "expense") {
-        await deleteExpense(createClient(), item.id);
-        setFeedback("Gasto excluido.");
-      } else {
-        await Promise.all(item.payables.map((payable) => deletePayable(createClient(), payable.id)));
-        setFeedback(item.payables.length > 1 ? "Conta parcelada excluida." : "Conta a pagar excluida.");
-      }
-      await load();
+      await runMutation("Excluindo registro...", async () => {
+        if (item.type === "entry") {
+          await deleteEntry(createClient(), item.id);
+          setFeedback("Entrada excluida.");
+        } else if (item.type === "expense") {
+          await deleteExpense(createClient(), item.id);
+          setFeedback("Gasto excluido.");
+        } else {
+          await Promise.all(item.payables.map((payable) => deletePayable(createClient(), payable.id)));
+          setFeedback(item.payables.length > 1 ? "Conta parcelada excluida." : "Conta a pagar excluida.");
+        }
+        await load();
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel excluir o registro.");
     }
@@ -483,6 +521,14 @@ export default function ListaPage() {
             onError={setError}
           />
         ) : null}
+        {paymentRequest ? (
+          <PaymentAccountDialog
+            request={paymentRequest}
+            accounts={cashAccounts}
+            onClose={() => setPaymentRequest(null)}
+            onConfirm={confirmPayment}
+          />
+        ) : null}
       </AppShell>
     </AuthGuard>
   );
@@ -538,6 +584,7 @@ function EditPurchaseDialog({
   onSaved: () => void | Promise<void>;
   onError: (value: string) => void;
 }) {
+  const { runMutation } = useOperation();
   const purchase = item.purchase;
   const [description, setDescription] = useState(purchase.description);
   const [cardId, setCardId] = useState(purchase.card_id);
@@ -569,19 +616,21 @@ function EditPurchaseDialog({
     try {
       const effectiveInstallmentsCount = category === "subscriptions" && isRecurring && recurringStatus === "active" ? 12 : Number(installmentsCount);
       const parsedAmount = Number(installmentAmount.replace(/\./g, "").replace(",", "."));
-      await updateCardPurchase(createClient(), purchase.id, {
-        card,
-        description,
-        purchase_date: brToIso(purchaseDate),
-        category,
-        installment_amount: amountMode === "total" ? parsedAmount / effectiveInstallmentsCount : parsedAmount,
-        installments_count: effectiveInstallmentsCount,
-        start_installment: Number(startInstallment),
-        is_recurring: category === "subscriptions" && isRecurring,
-        recurring_status: category === "subscriptions" && isRecurring ? recurringStatus : "inactive",
-        notes: notes.trim() || null,
+      await runMutation("Atualizando compra...", async () => {
+        await updateCardPurchase(createClient(), purchase.id, {
+          card,
+          description,
+          purchase_date: brToIso(purchaseDate),
+          category,
+          installment_amount: amountMode === "total" ? parsedAmount / effectiveInstallmentsCount : parsedAmount,
+          installments_count: effectiveInstallmentsCount,
+          start_installment: Number(startInstallment),
+          is_recurring: category === "subscriptions" && isRecurring,
+          recurring_status: category === "subscriptions" && isRecurring ? recurringStatus : "inactive",
+          notes: notes.trim() || null,
+        });
+        await onSaved();
       });
-      await onSaved();
     } catch (err) {
       onError(err instanceof Error ? err.message : "Nao foi possivel editar a compra.");
     } finally {
@@ -694,11 +743,12 @@ function EditRecordDialog({
   onError,
 }: {
   item: EditableRecord;
-  cashAccounts: CashAccount[];
+  cashAccounts: CashAccountWithBalance[];
   onClose: () => void;
   onSaved: () => void | Promise<void>;
   onError: (value: string) => void;
 }) {
+  const { runMutation } = useOperation();
   const [description, setDescription] = useState(item.title.replace(/\s\d+\/\d+$/, ""));
   const [amount, setAmount] = useState(String(item.amount).replace(".", ","));
   const [date, setDate] = useState(isoToBr(item.type === "payable" ? item.firstDueDate : item.date));
@@ -746,47 +796,49 @@ function EditRecordDialog({
 
     setSaving(true);
     try {
-      if (item.type === "entry") {
-        await updateEntry(createClient(), item.id, {
-          description: description.trim(),
-          amount: parsedAmount,
-          date: brToIso(date),
-          cash_account_id: cashAccountId,
-          notes: notes.trim() || null,
-        });
-      } else if (item.type === "expense") {
-        await updateExpense(createClient(), item.id, {
-          description: description.trim(),
-          amount: parsedAmount,
-          due_date: brToIso(date),
-          payment_method: paymentMethod,
-          category,
-          status,
-          notes: notes.trim() || null,
-        });
-      } else if (item.payables.length > 1 || parsedInstallments > 1) {
-        await updatePayableGroup(createClient(), item.payable.payable_group_id, {
-          description: description.trim(),
-          amount: parsedAmount,
-          purchase_date: brToIso(purchaseDate),
-          due_date: brToIso(date),
-          category,
-          status,
-          installments_count: parsedInstallments,
-          notes: notes.trim() || null,
-        });
-      } else {
-        await updatePayable(createClient(), item.payable.id, {
-          description: description.trim(),
-          amount: parsedAmount,
-          purchase_date: brToIso(purchaseDate),
-          due_date: brToIso(date),
-          category,
-          status,
-          notes: notes.trim() || null,
-        });
-      }
-      await onSaved();
+      await runMutation("Salvando alteracoes...", async () => {
+        if (item.type === "entry") {
+          await updateEntry(createClient(), item.id, {
+            description: description.trim(),
+            amount: parsedAmount,
+            date: brToIso(date),
+            cash_account_id: cashAccountId,
+            notes: notes.trim() || null,
+          });
+        } else if (item.type === "expense") {
+          await updateExpense(createClient(), item.id, {
+            description: description.trim(),
+            amount: parsedAmount,
+            due_date: brToIso(date),
+            payment_method: paymentMethod,
+            category,
+            status,
+            notes: notes.trim() || null,
+          });
+        } else if (item.payables.length > 1 || parsedInstallments > 1) {
+          await updatePayableGroup(createClient(), item.payable.payable_group_id, {
+            description: description.trim(),
+            amount: parsedAmount,
+            purchase_date: brToIso(purchaseDate),
+            due_date: brToIso(date),
+            category,
+            status,
+            installments_count: parsedInstallments,
+            notes: notes.trim() || null,
+          });
+        } else {
+          await updatePayable(createClient(), item.payable.id, {
+            description: description.trim(),
+            amount: parsedAmount,
+            purchase_date: brToIso(purchaseDate),
+            due_date: brToIso(date),
+            category,
+            status,
+            notes: notes.trim() || null,
+          });
+        }
+        await onSaved();
+      });
     } catch (err) {
       onError(err instanceof Error ? err.message : "Nao foi possivel editar o registro.");
     } finally {
@@ -860,8 +912,9 @@ function EditRecordDialog({
                 <span className="mb-1 block text-sm font-medium text-gray-700">Status</span>
                 <select value={status} onChange={(event) => setStatus(event.target.value as PaymentStatus)} className="h-11 w-full rounded-lg border border-gray-300 bg-white px-3">
                   <option value="pending">Pendente</option>
-                  <option value="paid">Pago</option>
+                  {item.status === "paid" ? <option value="paid">Pago</option> : null}
                 </select>
+                {item.status === "pending" ? <span className="mt-1 block text-xs text-gray-500">Use a acao Pagar para escolher a conta de saida.</span> : null}
               </label>
             </>
           ) : null}

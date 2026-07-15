@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -16,6 +16,7 @@ import { getInvoiceDueDate, toIsoDate } from "@/lib/dates/invoice";
 import { formatCurrency, toNumber } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import type { Card, CashAccountWithBalance } from "@/types/finance";
+import { useOperation } from "@/components/providers/OperationProvider";
 
 const today = () => {
   const now = new Date();
@@ -130,20 +131,23 @@ export default function RegistrarPage() {
   const [cards, setCards] = useState<Card[]>([]);
   const [cashAccounts, setCashAccounts] = useState<CashAccountWithBalance[]>([]);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const { runQuery } = useOperation();
 
-  async function loadOptions() {
+  const loadOptions = useCallback(async () => {
     if (!hasSupabaseConfig()) return;
-    const [nextCards, nextCashAccounts] = await Promise.all([
-      fetchCards(createClient()),
-      fetchCashAccounts(createClient()),
-    ]);
-    setCards(nextCards.filter((card) => card.is_active));
-    setCashAccounts(nextCashAccounts.filter((account) => account.is_active));
-  }
+    await runQuery("Carregando opcoes...", async () => {
+      const [nextCards, nextCashAccounts] = await Promise.all([
+        fetchCards(createClient()),
+        fetchCashAccounts(createClient()),
+      ]);
+      setCards(nextCards.filter((card) => card.is_active));
+      setCashAccounts(nextCashAccounts.filter((account) => account.is_active));
+    });
+  }, [runQuery]);
 
   useEffect(() => {
     loadOptions();
-  }, []);
+  }, [loadOptions]);
 
   useEffect(() => {
     if (!feedback) return;
@@ -210,6 +214,7 @@ function ModeButton({ active, label, icon, onClick }: { active: boolean; label: 
 }
 
 function EntryFormView({ cashAccounts, onFeedback }: { cashAccounts: CashAccountWithBalance[]; onFeedback: (value: Feedback) => void }) {
+  const { runMutation } = useOperation();
   const form = useForm<EntryInput, unknown, EntryForm>({
     resolver: zodResolver(entrySchema),
     defaultValues: { date: todayBr(), description: "", amount: "", cash_account_id: "", notes: "" },
@@ -217,15 +222,17 @@ function EntryFormView({ cashAccounts, onFeedback }: { cashAccounts: CashAccount
   const dateValue = useWatch({ control: form.control, name: "date" }) ?? "";
   async function submit(values: EntryForm) {
     try {
-      await createEntry(createClient(), values);
-      const account = cashAccounts.find((candidate) => candidate.id === values.cash_account_id);
-      form.reset({ date: todayBr(), description: "", amount: "", cash_account_id: values.cash_account_id, notes: "" });
-      onFeedback({
-        tone: "success",
-        title: "Entrada registrada",
-        description: `O valor foi adicionado ao saldo de ${account?.name ?? "sua conta"}.`,
-        href: "/caixa",
-        hrefLabel: "Ver no Caixa",
+      await runMutation("Registrando entrada...", async () => {
+        await createEntry(createClient(), values);
+        const account = cashAccounts.find((candidate) => candidate.id === values.cash_account_id);
+        form.reset({ date: todayBr(), description: "", amount: "", cash_account_id: values.cash_account_id, notes: "" });
+        onFeedback({
+          tone: "success",
+          title: "Entrada registrada",
+          description: `O valor foi adicionado ao saldo de ${account?.name ?? "sua conta"}.`,
+          href: "/caixa",
+          hrefLabel: "Ver no Caixa",
+        });
       });
     } catch (err) {
       onFeedback({ tone: "error", title: "Nao foi possivel salvar a entrada", description: err instanceof Error ? err.message : "Tente novamente." });
@@ -263,6 +270,7 @@ function EntryFormView({ cashAccounts, onFeedback }: { cashAccounts: CashAccount
 }
 
 function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
+  const { runMutation } = useOperation();
   const form = useForm<ExpenseInput, unknown, ExpenseForm>({
     resolver: zodResolver(expenseSchema),
     defaultValues: { due_date: todayBr(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" },
@@ -270,15 +278,17 @@ function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
   const dueDateValue = useWatch({ control: form.control, name: "due_date" }) ?? "";
   async function submit(values: ExpenseForm) {
     try {
-      await createExpense(createClient(), values);
-      form.reset({ due_date: todayBr(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" });
-      const monthValue = values.due_date.slice(0, 7);
-      onFeedback({
-        tone: "success",
-        title: "Gasto registrado",
-        description: `Ele ja aparece em ${monthLabel(monthValue)} como ${values.status === "paid" ? "pago" : "pendente"}.`,
-        href: `/inicio?mes=${monthValue}`,
-        hrefLabel: "Ver no Inicio",
+      await runMutation("Registrando gasto...", async () => {
+        await createExpense(createClient(), values);
+        form.reset({ due_date: todayBr(), payment_method: "pix", category: "other", status: "pending", description: "", amount: "", notes: "" });
+        const monthValue = values.due_date.slice(0, 7);
+        onFeedback({
+          tone: "success",
+          title: "Gasto registrado",
+          description: `Ele ja aparece em ${monthLabel(monthValue)} como ${values.status === "paid" ? "pago" : "pendente"}.`,
+          href: `/inicio?mes=${monthValue}`,
+          hrefLabel: "Ver no Inicio",
+        });
       });
     } catch (err) {
       onFeedback({ tone: "error", title: "Nao foi possivel salvar o gasto", description: err instanceof Error ? err.message : "Tente novamente." });
@@ -313,6 +323,7 @@ function ExpenseFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
 }
 
 function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void }) {
+  const { runMutation } = useOperation();
   const [amountMode, setAmountMode] = useState<"total" | "installment">("total");
   const form = useForm<PayableInput, unknown, PayableForm>({
     resolver: zodResolver(payableSchema),
@@ -330,22 +341,24 @@ function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
   const installmentAmount = totalAmount > 0 ? totalAmount / installmentsCount : 0;
   async function submit(values: PayableForm) {
     try {
-      await createPayable(createClient(), {
-        ...values,
-        amount: amountMode === "installment" ? values.amount * Number(values.installments_count) : values.amount,
-      });
-      form.reset({ purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", installments_count: 1, description: "", amount: "", notes: "" });
-      setAmountMode("total");
-      const monthValue = values.due_date.slice(0, 7);
-      const count = Number(values.installments_count);
-      onFeedback({
-        tone: "success",
-        title: "Conta a pagar registrada",
-        description: count === 1
-          ? `Ela ja aparece em ${monthLabel(monthValue)} como ${values.status === "paid" ? "paga" : "pendente"}.`
-          : `${count} parcelas foram criadas a partir de ${monthLabel(monthValue)}.`,
-        href: `/inicio?mes=${monthValue}`,
-        hrefLabel: "Ver no Inicio",
+      await runMutation("Registrando conta a pagar...", async () => {
+        await createPayable(createClient(), {
+          ...values,
+          amount: amountMode === "installment" ? values.amount * Number(values.installments_count) : values.amount,
+        });
+        form.reset({ purchase_date: todayBr(), due_date: todayBr(), category: "other", status: "pending", installments_count: 1, description: "", amount: "", notes: "" });
+        setAmountMode("total");
+        const monthValue = values.due_date.slice(0, 7);
+        const count = Number(values.installments_count);
+        onFeedback({
+          tone: "success",
+          title: "Conta a pagar registrada",
+          description: count === 1
+            ? `Ela ja aparece em ${monthLabel(monthValue)} como ${values.status === "paid" ? "paga" : "pendente"}.`
+            : `${count} parcelas foram criadas a partir de ${monthLabel(monthValue)}.`,
+          href: `/inicio?mes=${monthValue}`,
+          hrefLabel: "Ver no Inicio",
+        });
       });
     } catch (err) {
       onFeedback({ tone: "error", title: "Nao foi possivel salvar a conta", description: err instanceof Error ? err.message : "Tente novamente." });
@@ -403,6 +416,7 @@ function PayableFormView({ onFeedback }: { onFeedback: (value: Feedback) => void
 }
 
 function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (value: Feedback) => void }) {
+  const { runMutation } = useOperation();
   const [amountMode, setAmountMode] = useState<"installment" | "total">("installment");
   const form = useForm<PurchaseInput, unknown, PurchaseForm>({
     resolver: zodResolver(purchaseSchema),
@@ -460,35 +474,37 @@ function PurchaseFormView({ cards, onFeedback }: { cards: Card[]; onFeedback: (v
       return;
     }
     try {
-      const effectiveInstallmentsCount = values.is_recurring && values.recurring_status === "active" ? 12 : values.installments_count;
-      const normalizedValues = {
-        description: values.description,
-        card_id: values.card_id,
-        purchase_date: values.purchase_date,
-        category: values.category,
-        installment_amount: amountMode === "total" ? values.installment_amount / effectiveInstallmentsCount : values.installment_amount,
-        installments_count: effectiveInstallmentsCount,
-        start_installment: values.is_ongoing ? values.start_installment : 1,
-        is_recurring: values.is_recurring,
-        recurring_status: values.is_recurring ? values.recurring_status : "inactive",
-        notes: values.notes,
-      };
-      const result = await createCardPurchase(createClient(), { ...normalizedValues, card });
-      const firstInstallment = result.installments[0];
-      const lastInstallment = result.installments.at(-1);
-      const monthValue = `${firstInstallment.invoice_year}-${String(firstInstallment.invoice_month).padStart(2, "0")}`;
-      const createdCount = result.installments.length;
-      form.reset({ purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, is_recurring: false, recurring_status: "inactive", start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
-      setAmountMode("installment");
-      onFeedback({
-        tone: "success",
-        title: "Compra no cartao registrada",
-        description:
-          createdCount === 1
-            ? `A parcela vence em ${formatDateBr(firstInstallment.due_date)} e aparece em ${monthLabel(monthValue)}.`
-            : `${createdCount} parcelas foram criadas. A primeira aparece em ${monthLabel(monthValue)} e a ultima vence em ${formatDateBr(lastInstallment?.due_date ?? firstInstallment.due_date)}.`,
-        href: `/inicio?mes=${monthValue}`,
-        hrefLabel: `Ver ${monthLabel(monthValue)}`,
+      await runMutation("Registrando compra...", async () => {
+        const effectiveInstallmentsCount = values.is_recurring && values.recurring_status === "active" ? 12 : values.installments_count;
+        const normalizedValues = {
+          description: values.description,
+          card_id: values.card_id,
+          purchase_date: values.purchase_date,
+          category: values.category,
+          installment_amount: amountMode === "total" ? values.installment_amount / effectiveInstallmentsCount : values.installment_amount,
+          installments_count: effectiveInstallmentsCount,
+          start_installment: values.is_ongoing ? values.start_installment : 1,
+          is_recurring: values.is_recurring,
+          recurring_status: values.is_recurring ? values.recurring_status : "inactive",
+          notes: values.notes,
+        };
+        const result = await createCardPurchase(createClient(), { ...normalizedValues, card });
+        const firstInstallment = result.installments[0];
+        const lastInstallment = result.installments.at(-1);
+        const monthValue = `${firstInstallment.invoice_year}-${String(firstInstallment.invoice_month).padStart(2, "0")}`;
+        const createdCount = result.installments.length;
+        form.reset({ purchase_date: todayBr(), category: "other", installments_count: 1, is_ongoing: false, is_recurring: false, recurring_status: "inactive", start_installment: 1, description: "", card_id: "", installment_amount: "", notes: "" });
+        setAmountMode("installment");
+        onFeedback({
+          tone: "success",
+          title: "Compra no cartao registrada",
+          description:
+            createdCount === 1
+              ? `A parcela vence em ${formatDateBr(firstInstallment.due_date)} e aparece em ${monthLabel(monthValue)}.`
+              : `${createdCount} parcelas foram criadas. A primeira aparece em ${monthLabel(monthValue)} e a ultima vence em ${formatDateBr(lastInstallment?.due_date ?? firstInstallment.due_date)}.`,
+          href: `/inicio?mes=${monthValue}`,
+          hrefLabel: `Ver ${monthLabel(monthValue)}`,
+        });
       });
     } catch (err) {
       onFeedback({ tone: "error", title: "Nao foi possivel salvar a compra", description: err instanceof Error ? err.message : "Tente novamente." });

@@ -20,6 +20,7 @@ import { expenseCategories, getCategoryLabel, getCategoryMeta } from "@/lib/fina
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
 import type { Card, ExpenseCategory } from "@/types/finance";
+import { useOperation } from "@/components/providers/OperationProvider";
 
 const maskDateBr = (value: string) => {
   const digits = value.replace(/\D/g, "").slice(0, 8);
@@ -66,25 +67,28 @@ export default function CompraDetalhePage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
+  const { runMutation, runQuery } = useOperation();
 
   const load = useCallback(async () => {
     if (!hasSupabaseConfig() || !purchaseId) return;
     setLoading(true);
     setError("");
     try {
-      const supabase = createClient();
-      const [purchaseData, cardData] = await Promise.all([
-        fetchCardPurchaseDetails(supabase, purchaseId),
-        fetchCards(supabase),
-      ]);
-      setPurchase(purchaseData);
-      setCards(cardData);
+      await runQuery("Carregando compra...", async () => {
+        const supabase = createClient();
+        const [purchaseData, cardData] = await Promise.all([
+          fetchCardPurchaseDetails(supabase, purchaseId),
+          fetchCards(supabase),
+        ]);
+        setPurchase(purchaseData);
+        setCards(cardData);
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel carregar a compra.");
     } finally {
       setLoading(false);
     }
-  }, [purchaseId]);
+  }, [purchaseId, runQuery]);
 
   useEffect(() => {
     load();
@@ -150,21 +154,23 @@ export default function CompraDetalhePage() {
     setError("");
     setFeedback("");
     try {
-      await updateCardPurchase(createClient(), purchase.id, {
-        card,
-        description: form.description.trim(),
-        purchase_date: brToIso(form.purchaseDate),
-        category: form.category,
-        installment_amount: installmentAmount,
-        installments_count: installmentsCount,
-        start_installment: startInstallment,
-        is_recurring: form.category === "subscriptions" && form.isRecurring,
-        recurring_status: form.category === "subscriptions" && form.isRecurring ? form.recurringStatus : "inactive",
-        notes: form.notes.trim() || null,
+      await runMutation("Atualizando compra...", async () => {
+        await updateCardPurchase(createClient(), purchase.id, {
+          card,
+          description: form.description.trim(),
+          purchase_date: brToIso(form.purchaseDate),
+          category: form.category,
+          installment_amount: installmentAmount,
+          installments_count: installmentsCount,
+          start_installment: startInstallment,
+          is_recurring: form.category === "subscriptions" && form.isRecurring,
+          recurring_status: form.category === "subscriptions" && form.isRecurring ? form.recurringStatus : "inactive",
+          notes: form.notes.trim() || null,
+        });
+        setEditing(false);
+        setFeedback("Compra atualizada.");
+        await load();
       });
-      setEditing(false);
-      setFeedback("Compra atualizada.");
-      await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel salvar a compra.");
     } finally {
@@ -181,8 +187,10 @@ export default function CompraDetalhePage() {
     setError("");
     setFeedback("");
     try {
-      await cancelCardPurchase(createClient(), purchase.id);
-      router.push("/lista");
+      await runMutation("Excluindo compra...", async () => {
+        await cancelCardPurchase(createClient(), purchase.id);
+        router.push("/lista");
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel excluir a compra.");
       setSaving(false);

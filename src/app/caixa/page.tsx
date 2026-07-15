@@ -2,15 +2,21 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowDownLeft, ArrowRightLeft, ArrowUpRight, Edit3, Landmark, Plus, Trash2, X } from "lucide-react";
+import { ArrowDownLeft, ArrowRightLeft, ArrowUpRight, Edit3, Landmark, Plus, Trash2, Undo2, X } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
 import { ConfigNotice } from "@/components/layout/ConfigNotice";
-import { createCashTransaction, createCashTransfer, deleteCashAccount, fetchCashData, saveCashAccount } from "@/features/finance/api";
+import { createCashTransaction, createCashTransfer, deleteCashAccount, deleteCashTransaction, fetchCashData, saveCashAccount, undoCashTransaction } from "@/features/finance/api";
 import { formatDateBr } from "@/lib/dates/format";
 import { formatCurrency } from "@/lib/money/format";
 import { createClient, hasSupabaseConfig } from "@/lib/supabase/client";
-import type { CashAccountWithBalance, CashTransaction } from "@/types/finance";
+import type { CashAccountWithBalance, CashTransactionWithActions } from "@/types/finance";
+import { useOperation } from "@/components/providers/OperationProvider";
+
+type CashActionRequest = {
+  action: "undo" | "delete";
+  transaction: CashTransactionWithActions;
+};
 
 const today = () => {
   const now = new Date();
@@ -35,7 +41,7 @@ const parseMoney = (value: string) => Number(value.replace(/\./g, "").replace(",
 
 export default function CaixaPage() {
   const [accounts, setAccounts] = useState<CashAccountWithBalance[]>([]);
-  const [transactions, setTransactions] = useState<(CashTransaction & { cash_accounts?: { name: string; color: string } | null })[]>([]);
+  const [transactions, setTransactions] = useState<CashTransactionWithActions[]>([]);
   const [editingAccount, setEditingAccount] = useState<CashAccountWithBalance | null>(null);
   const [editAccountName, setEditAccountName] = useState("");
   const [editAccountColor, setEditAccountColor] = useState("#111827");
@@ -54,25 +60,30 @@ export default function CaixaPage() {
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [cashAction, setCashAction] = useState<CashActionRequest | null>(null);
+  const [cashActionSaving, setCashActionSaving] = useState(false);
+  const { runMutation, runQuery } = useOperation();
 
   const load = useCallback(async () => {
     if (!hasSupabaseConfig()) return;
     setLoading(true);
     setError("");
     try {
-      const data = await fetchCashData(createClient());
-      setAccounts(data.accounts);
-      setTransactions(data.transactions);
-      const firstActive = data.accounts.find((account) => account.is_active);
-      setTransactionAccountId((current) => current || firstActive?.id || "");
-      setFromAccountId((current) => current || firstActive?.id || "");
-      setToAccountId((current) => current || data.accounts.find((account) => account.id !== firstActive?.id)?.id || "");
+      await runQuery("Carregando caixa...", async () => {
+        const data = await fetchCashData(createClient());
+        setAccounts(data.accounts);
+        setTransactions(data.transactions);
+        const firstActive = data.accounts.find((account) => account.is_active);
+        setTransactionAccountId((current) => current || firstActive?.id || "");
+        setFromAccountId((current) => current || firstActive?.id || "");
+        setToAccountId((current) => current || data.accounts.find((account) => account.id !== firstActive?.id)?.id || "");
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel carregar o caixa.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [runQuery]);
 
   useEffect(() => {
     load();
@@ -89,11 +100,13 @@ export default function CaixaPage() {
     setError("");
     setFeedback("");
     try {
-      await saveCashAccount(createClient(), { name: accountName.trim(), color: accountColor, is_active: true });
-      setAccountName("");
-      setAccountColor("#111827");
-      setFeedback("Conta criada.");
-      await load();
+      await runMutation("Criando conta...", async () => {
+        await saveCashAccount(createClient(), { name: accountName.trim(), color: accountColor, is_active: true });
+        setAccountName("");
+        setAccountColor("#111827");
+        setFeedback("Conta criada.");
+        await load();
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel criar a conta.");
     }
@@ -117,14 +130,16 @@ export default function CaixaPage() {
     setError("");
     setFeedback("");
     try {
-      await saveCashAccount(
-        createClient(),
-        { name: editAccountName.trim(), color: editAccountColor, is_active: editAccountActive },
-        editingAccount.id,
-      );
-      setEditingAccount(null);
-      setFeedback("Conta atualizada.");
-      await load();
+      await runMutation("Atualizando conta...", async () => {
+        await saveCashAccount(
+          createClient(),
+          { name: editAccountName.trim(), color: editAccountColor, is_active: editAccountActive },
+          editingAccount.id,
+        );
+        setEditingAccount(null);
+        setFeedback("Conta atualizada.");
+        await load();
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel editar a conta.");
     }
@@ -136,9 +151,11 @@ export default function CaixaPage() {
     setError("");
     setFeedback("");
     try {
-      await deleteCashAccount(createClient(), account.id);
-      setFeedback("Conta excluida.");
-      await load();
+      await runMutation("Excluindo conta...", async () => {
+        await deleteCashAccount(createClient(), account.id);
+        setFeedback("Conta excluida.");
+        await load();
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel excluir a conta.");
     }
@@ -155,20 +172,22 @@ export default function CaixaPage() {
     setError("");
     setFeedback("");
     try {
-      await createCashTransaction(createClient(), {
-        account_id: transactionAccountId,
-        type: transactionType,
-        amount: transactionType === "income" ? amount : -amount,
-        date: isoDate,
-        description: transactionDescription.trim(),
-        source_type: "manual",
-        source_id: null,
-        notes: null,
+      await runMutation(transactionType === "income" ? "Adicionando dinheiro..." : "Retirando dinheiro...", async () => {
+        await createCashTransaction(createClient(), {
+          account_id: transactionAccountId,
+          type: transactionType,
+          amount: transactionType === "income" ? amount : -amount,
+          date: isoDate,
+          description: transactionDescription.trim(),
+          source_type: "manual",
+          source_id: null,
+          notes: null,
+        });
+        setTransactionAmount("");
+        setTransactionDescription("");
+        setFeedback("Movimentacao registrada.");
+        await load();
       });
-      setTransactionAmount("");
-      setTransactionDescription("");
-      setFeedback("Movimentacao registrada.");
-      await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel registrar a movimentacao.");
     }
@@ -185,19 +204,45 @@ export default function CaixaPage() {
     setError("");
     setFeedback("");
     try {
-      await createCashTransfer(createClient(), {
-        from_account_id: fromAccountId,
-        to_account_id: toAccountId,
-        amount,
-        date: isoDate,
-        description: "Transferencia entre contas",
-        notes: null,
+      await runMutation("Transferindo dinheiro...", async () => {
+        await createCashTransfer(createClient(), {
+          from_account_id: fromAccountId,
+          to_account_id: toAccountId,
+          amount,
+          date: isoDate,
+          description: "Transferencia entre contas",
+          notes: null,
+        });
+        setTransferAmount("");
+        setFeedback("Transferencia registrada.");
+        await load();
       });
-      setTransferAmount("");
-      setFeedback("Transferencia registrada.");
-      await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Nao foi possivel transferir.");
+    }
+  }
+
+  async function confirmCashAction() {
+    if (!cashAction) return;
+    setCashActionSaving(true);
+    setError("");
+    setFeedback("");
+    try {
+      await runMutation(cashAction.action === "undo" ? "Desfazendo movimentacao..." : "Excluindo movimentacao...", async () => {
+        if (cashAction.action === "undo") {
+          await undoCashTransaction(createClient(), cashAction.transaction.id);
+          setFeedback("Movimentacao desfeita e saldo atualizado.");
+        } else {
+          await deleteCashTransaction(createClient(), cashAction.transaction.id);
+          setFeedback("Movimentacao excluida e saldo atualizado.");
+        }
+        setCashAction(null);
+        await load();
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Nao foi possivel concluir a acao.");
+    } finally {
+      setCashActionSaving(false);
     }
   }
 
@@ -323,19 +368,98 @@ export default function CaixaPage() {
           ) : (
             <div className="divide-y divide-gray-100">
               {transactions.map((transaction) => (
-                <div key={transaction.id} className="flex items-center justify-between gap-3 p-4">
+                <div key={transaction.id} className="flex flex-col items-stretch justify-between gap-3 p-4 sm:flex-row sm:items-center">
                   <div className="min-w-0">
                     <p className="truncate font-semibold">{transaction.description}</p>
                     <p className="text-sm text-gray-500">{transaction.cash_accounts?.name ?? "Conta"} - {formatDateBr(transaction.date)}</p>
+                    {transaction.is_reversed ? <p className="mt-1 text-xs font-bold text-gray-500">Desfeita</p> : null}
                   </div>
-                  <p className={`shrink-0 font-bold ${Number(transaction.amount) >= 0 ? "text-emerald-600" : "text-red-600"}`}>{formatCurrency(transaction.amount)}</p>
+                  <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 sm:justify-end">
+                    <p className={`font-bold ${Number(transaction.amount) >= 0 ? "text-emerald-600" : "text-red-600"}`}>{formatCurrency(transaction.amount)}</p>
+                    {transaction.can_undo ? (
+                      <button type="button" onClick={() => setCashAction({ action: "undo", transaction })} title="Desfazer movimentacao" className="inline-flex h-9 items-center gap-1 rounded-lg border border-gray-200 px-2 text-xs font-bold text-gray-700">
+                        <Undo2 size={15} /> Desfazer
+                      </button>
+                    ) : null}
+                    {transaction.can_delete ? (
+                      <button type="button" onClick={() => setCashAction({ action: "delete", transaction })} title="Excluir movimentacao" className="grid size-9 place-items-center rounded-lg border border-red-200 text-red-700">
+                        <Trash2 size={15} />
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               ))}
             </div>
           )}
         </section>
+
+        {cashAction ? (
+          <CashActionDialog
+            request={cashAction}
+            saving={cashActionSaving}
+            onClose={() => setCashAction(null)}
+            onConfirm={confirmCashAction}
+          />
+        ) : null}
       </AppShell>
     </AuthGuard>
+  );
+}
+
+function CashActionDialog({
+  request,
+  saving,
+  onClose,
+  onConfirm,
+}: {
+  request: CashActionRequest;
+  saving: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const { action, transaction } = request;
+  const isTransfer = transaction.source_type === "transfer";
+  const sourceImpact = transaction.source_type === "entry"
+    ? "A entrada vinculada sera removida e o credito sera estornado."
+    : transaction.source_type === "expense"
+      ? "O gasto voltara para pendente e o valor retornara para a conta."
+      : transaction.source_type === "payable"
+        ? "A conta a pagar voltara para pendente e o valor retornara para a conta."
+        : transaction.source_type === "card_invoice"
+          ? "A fatura voltara para pendente e o valor retornara para a conta."
+          : isTransfer
+            ? action === "undo"
+              ? "As duas pontas da transferencia receberao estornos."
+              : "A saida e a entrada da transferencia serao removidas."
+            : action === "undo"
+              ? "Uma movimentacao inversa sera criada para preservar o historico."
+              : "O lancamento manual sera removido definitivamente.";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end bg-black/40 p-4 sm:items-center sm:justify-center" role="dialog" aria-modal="true" aria-label={`${action === "undo" ? "Desfazer" : "Excluir"} movimentacao`}>
+      <div className="w-full max-w-md rounded-lg bg-white p-4 shadow-xl">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="font-bold">{action === "undo" ? "Desfazer movimentacao" : "Excluir movimentacao"}</h2>
+            <p className="mt-1 text-sm text-gray-500">{transaction.description}</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving} aria-label="Fechar" title="Fechar" className="grid size-9 shrink-0 place-items-center rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50">
+            <X size={17} />
+          </button>
+        </div>
+        <div className="my-4 rounded-lg bg-gray-100 p-4">
+          <p className="text-sm text-gray-500">Impacto original no saldo</p>
+          <p className={`mt-1 text-xl font-bold ${Number(transaction.amount) >= 0 ? "text-emerald-700" : "text-red-700"}`}>{formatCurrency(transaction.amount)}</p>
+          <p className="mt-3 text-sm text-gray-700">{sourceImpact}</p>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" onClick={onClose} disabled={saving} className="h-11 rounded-lg border border-gray-200 font-bold text-gray-700 disabled:opacity-50">Cancelar</button>
+          <button type="button" onClick={onConfirm} disabled={saving} className={`h-11 rounded-lg font-bold text-white disabled:opacity-50 ${action === "delete" ? "bg-red-700" : "bg-gray-950"}`}>
+            {saving ? "Processando..." : action === "undo" ? "Confirmar estorno" : "Confirmar exclusao"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
